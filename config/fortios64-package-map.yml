@@ -1,0 +1,48 @@
+packages:
+  - pattern: '(?i)(^|[-_.])AV\.pkg$'
+    kind: AV
+    restore_family: av
+    safe_for_deferred_apply: true
+    expected_objects: [Virus Definitions, Extended set]
+
+  - pattern: '(?i)(^|[-_.])ips\.pkg$'
+    kind: IPS
+    restore_family: ips
+    safe_for_deferred_apply: true
+    expected_objects: [Attack Definitions, Attack Extended Definitions]
+
+  - pattern: '(?i)(^|[-_.])apdb\.pkg$'
+    kind: APDB
+    restore_family: ips
+    safe_for_deferred_apply: true
+    expected_objects: [Application Definitions]
+
+  - pattern: '(?i)(^|[-_.])ffdb\.pkg$'
+    kind: FFDB
+    restore_family: other-objects
+    safe_for_deferred_apply: true
+    expected_objects: [Internet-service Database Apps, Internet-service Full Database Maps]
+
+  - pattern: '(?i)(^|[-_.])MCDB\.pkg$'
+    kind: MCDB
+    restore_family: other-objects
+    safe_for_deferred_apply: true
+    expected_objects: [Malicious Certificate DB]
+
+  - pattern: '(?i)(^|[-_.])MM\.pkg$'
+    kind: MMDB
+    restore_family: av
+    safe_for_deferred_apply: true
+    expected_objects: [Mobile Malware Definitions]
+
+  - pattern: '(?i)(^|[-_.])isdb\.pkg$'
+    kind: ISDB
+    restore_family: other-objects
+    safe_for_deferred_apply: false
+    expected_objects: [Industrial Attack Definitions]
+
+  - pattern: '(?i)Botnet-Domain\.pkg$'
+    kind: BOTNET
+    restore_family: other-objects
+    safe_for_deferred_apply: false
+    expected_objects: [Botnet Domain Database]

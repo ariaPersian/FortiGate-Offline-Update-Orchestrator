@@ -1,0 +1,41 @@
+name: Prepare offline update
+
+on:
+  workflow_dispatch:
+    inputs:
+      bundle_path:
+        description: Absolute path to the ZIP on the private runner
+        required: true
+        type: string
+      device_name:
+        description: Device key from config/devices.yml
+        required: true
+        default: SITEC-FW-02
+        type: string
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  prepare:
+    runs-on: [self-hosted, windows, fgops, sitec]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - shell: pwsh
+        run: python -m pip install -e .
+      - name: Inventory bundle without applying it
+        shell: pwsh
+        run: >-
+          fgops inventory
+          "${{ inputs.bundle_path }}"
+          --output "$env:RUNNER_TEMP\fgops-${{ github.run_id }}"
+          --package-map "config\fortios64-package-map.yml"
+      - name: Safety boundary
+        shell: pwsh
+        run: |
+          Write-Host "Preparation completed. No FortiGate command was executed."
+          Write-Host "Apply remains disabled until approval persistence and binding are tested."
