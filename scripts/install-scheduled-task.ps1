@@ -11,6 +11,9 @@ param(
     [ValidateRange(1, 168)]
     [int]$IntervalHours = 6,
 
+    [ValidateSet("run", "cycle")]
+    [string]$TaskCommand = "cycle",
+
     [string]$TaskName = "FGOps Offline Update Monitor"
 )
 
@@ -20,7 +23,7 @@ $config = (Resolve-Path $ConfigPath).Path
 
 $action = New-ScheduledTaskAction `
     -Execute $agent `
-    -Argument ('--config "{0}" run' -f $config)
+    -Argument ('--config "{0}" {1}' -f $config, $TaskCommand)
 
 # Pass repetition settings when constructing the trigger. On some Windows
 # PowerShell 5.1 / ScheduledTasks module versions, the returned CIM instance
@@ -48,7 +51,7 @@ $task = New-ScheduledTask `
     -Trigger $trigger `
     -Settings $settings `
     -Principal $principal `
-    -Description "Polls the configured offline FortiGate signature source and prepares new bundles."
+    -Description "Runs the FGOps prepare/notify policy cycle. Device apply occurs only when config execution.mode permits it."
 
 if ($PSCmdlet.ShouldProcess($TaskName, "Register scheduled task")) {
     Register-ScheduledTask -TaskName $TaskName -InputObject $task -Force | Out-Null

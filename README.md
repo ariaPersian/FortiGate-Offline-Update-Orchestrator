@@ -2,19 +2,22 @@
 
 **FortiGate Offline Update Orchestrator** automates preparation and controlled delivery of offline FortiGuard signature bundles.
 
-> Current milestone: `v0.4.1`. A standalone VM can monitor the source page, prepare and deduplicate a FortiOS 6.4 bundle, pin and validate the FortiGate SSH host key, validate encrypted full-config backup delivery independently, and apply an approved manifest package-by-package with before/after evidence.
+> Current milestone: `v0.5.0`. A standalone Windows VM can monitor the source page, prepare and deduplicate a FortiOS 6.4 bundle, notify through Telegram, load machine-scoped encrypted secrets for scheduled execution, validate encrypted full-config backup delivery, and apply a prepared manifest according to `prepare_only`, `approval`, or `unattended` policy.
 
 ## Primary deployment model
 
 ```text
-scheduled local agent
+Windows Scheduled Task (SYSTEM)
+  -> policy cycle
   -> monitor configured source page
   -> discover Fortigate V6.4 download link
   -> bounded download + SHA-256 deduplication
   -> safe extraction + package inventory
+  -> Telegram notification when configured
+  -> prepare_only: stop
+  -> approval: wait for exact local manifest approval
+  -> unattended: load DPAPI machine secrets
   -> pinned read-only SSH preflight
-  -> encrypted backup-only validation
-  -> exact manifest approval gate
   -> temporary restricted TFTP service
   -> encrypted full-config backup
   -> AV / IPS / APDB / FFDB / MCDB / MMDB restore
@@ -57,6 +60,54 @@ fgops-agent --config C:\ProgramData\FGOps\config.yml status
 
 The URL is rediscovered on each run. A reused URL does not hide a new package because archive identity is the downloaded SHA-256.
 
+## Windows machine secret store
+
+Scheduled execution cannot depend on process-scoped PowerShell environment variables. FGOps stores only DPAPI-encrypted ciphertext in:
+
+```text
+C:\ProgramData\FGOps\secrets\secret-store.json
+```
+
+The store uses Windows DPAPI `LocalMachine` scope and removes inherited ACLs, granting full control only to `SYSTEM` and the local Administrators group. The plaintext is injected into the scheduled process environment only for the duration of the controlled operation and is then restored/removed.
+
+Create the required secrets interactively from an elevated shell:
+
+```powershell
+fgops-agent --config C:\ProgramData\FGOps\config.yml secret set FGOPS_SSH_PASSWORD
+fgops-agent --config C:\ProgramData\FGOps\config.yml secret set FGOPS_BACKUP_PASSWORD
+fgops-agent --config C:\ProgramData\FGOps\config.yml secret set FGOPS_TELEGRAM_BOT_TOKEN
+fgops-agent --config C:\ProgramData\FGOps\config.yml secret status
+```
+
+Secret values are never printed by the CLI and must never be committed to Git.
+
+## Telegram notification policy
+
+Add an optional notification block to `config.yml`:
+
+```yaml
+storage:
+  root: C:/ProgramData/FGOps
+  secret_store: secrets/secret-store.json
+
+notifications:
+  telegram:
+    enabled: true
+    chat_id: "REPLACE_WITH_CHAT_ID"
+    token_secret_name: FGOPS_TELEGRAM_BOT_TOKEN
+    timeout_seconds: 30
+    notify_on: [PREPARED, FAILED, SUCCESS, SUCCESS_WITH_WARNING]
+```
+
+Validate and send a test message:
+
+```powershell
+fgops-agent --config C:\ProgramData\FGOps\config.yml validate-config
+fgops-agent --config C:\ProgramData\FGOps\config.yml notify-test
+```
+
+The Bot API token remains in the encrypted local secret store, not YAML.
+
 ## Backup-only validation
 
 Before the first live package restore, validate the exact SSH, global-context, TFTP, encryption, firewall, and persistence path independently:
@@ -74,34 +125,42 @@ device_changes_performed: false
 package_restores_performed: 0
 ```
 
-## Controlled apply
+## Execution policies
 
-The first live use must set:
+### `prepare_only`
+
+The cycle downloads, validates, inventories, and optionally notifies. It never connects to the FortiGate for apply.
+
+```yaml
+execution:
+  mode: prepare_only
+```
+
+### `approval`
+
+The cycle prepares and notifies, then waits. Apply requires the exact manifest ID and loads SSH/backup secrets from the machine store:
 
 ```yaml
 execution:
   mode: approval
 ```
 
-The command requires the operator to repeat the exact prepared manifest ID:
-
 ```powershell
 fgops-agent `
   --config C:\ProgramData\FGOps\config.yml `
-  apply `
-  --manifest-id FGOPS-0123456789ABCDEF `
-  --approve-manifest FGOPS-0123456789ABCDEF
+  approve --manifest-id FGOPS-0123456789ABCDEF
 ```
 
-Before any package restore, FGOps requires:
+### `unattended`
 
-- pinned SSH host key and passing target identity validation;
-- unchanged package hashes from manifest to TFTP staging;
-- an available management-facing UDP/69 endpoint;
-- a non-empty backup encryption secret from `FGOPS_BACKUP_PASSWORD`;
-- receipt of a non-empty encrypted full-config backup.
+A newly prepared manifest immediately passes through the same pinned preflight, mandatory encrypted backup, hash verification, temporary TFTP, downgrade protection, package allowlist, and postflight gates:
 
-Only the standard FortiOS overwrite confirmation is automatically answered. Signature, wrong-firmware, or downgrade warnings abort the run.
+```yaml
+execution:
+  mode: unattended
+```
+
+Enable this only after at least one approval-mode live evidence set has been reviewed.
 
 ## Result classification
 
@@ -113,18 +172,17 @@ expected object absent or unchanged                       FAILED_UNCONFIRMED
 object version decreased                                  FAILED
 ```
 
-## Schedule the monitor
-
-The recurring monitor can run independently of apply:
+## Schedule the policy cycle
 
 ```powershell
 .\scripts\install-scheduled-task.ps1 `
   -AgentExecutable C:\FGOps\venv\Scripts\fgops-agent.exe `
   -ConfigPath C:\ProgramData\FGOps\config.yml `
-  -IntervalHours 6
+  -IntervalHours 6 `
+  -TaskCommand cycle
 ```
 
-Do not schedule live apply until one complete approval-mode evidence set has been reviewed.
+The task runs as `SYSTEM`. `cycle` always obeys `execution.mode`; registration alone does not enable unattended apply.
 
 ## Commands
 
@@ -132,9 +190,13 @@ Do not schedule live apply until one complete approval-mode evidence set has bee
 fgops-agent init
 fgops-agent validate-config
 fgops-agent run [--dry-run]
+fgops-agent cycle
 fgops-agent scan-host-key
 fgops-agent preflight
 fgops-agent backup-test
+fgops-agent secret set|delete|status
+fgops-agent notify-test
+fgops-agent approve --manifest-id ...
 fgops-agent apply --manifest-id ... [--approve-manifest ...]
 fgops-agent status
 ```
@@ -148,7 +210,10 @@ fgops-agent status
 - SSH host-key pinning and expected target identity;
 - temporary TFTP root with exact backup upload basename;
 - encrypted backup required by default;
-- secrets read from environment variables, never YAML;
+- Windows DPAPI LocalMachine secret protection plus restrictive NTFS ACLs;
+- secrets injected only for the controlled operation;
+- Telegram token never stored in YAML;
+- explicit execution policy boundary;
 - backup-only test before first package restore;
 - fixed package order and stop-on-failure;
 - downgrade detection;

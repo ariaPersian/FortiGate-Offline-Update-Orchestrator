@@ -83,6 +83,7 @@ def run_agent_once(
         )
 
         if state.has_successful_archive(downloaded.sha256):
+            entry = state.archives.get(downloaded.sha256) or {}
             state.last_result = "NO_CHANGE"
             save_state(config.storage.state_file, state)
             return AgentRunResult(
@@ -91,6 +92,9 @@ def run_agent_once(
                 download_url=downloaded.source_url,
                 archive_sha256=downloaded.sha256,
                 archive_path=str(downloaded.path),
+                manifest_id=str(entry.get("manifest_id")) if entry.get("manifest_id") else None,
+                work_dir=str(entry.get("work_dir")) if entry.get("work_dir") else None,
+                planned_packages=tuple(str(item) for item in entry.get("planned_packages", [])),
                 message="The archive hash was already prepared successfully.",
             )
 
@@ -131,8 +135,8 @@ def run_agent_once(
             "planned_packages": list(planned),
             "device_execution_enabled": False,
             "safety_note": (
-                "This milestone downloads, validates, extracts, inventories, and plans only. "
-                "SSH/TFTP package application is not yet enabled."
+                "Preparation never changes the FortiGate. The separate cycle/apply command "
+                "enforces execution policy, pinned SSH, mandatory backup, and temporary TFTP."
             ),
         }
         _write_json(work_dir / "agent-plan.json", plan)
@@ -145,16 +149,19 @@ def run_agent_once(
             "manifest_id": manifest.manifest_id,
             "work_dir": str(work_dir),
             "planned_packages": list(planned),
+            "notification_status": None,
         }
         state.last_result = "PREPARED"
         save_state(config.storage.state_file, state)
 
-        message = "Bundle prepared successfully; device-changing execution remains disabled."
-        if config.execution.mode != "prepare_only" and not dry_run:
-            message = (
-                f"Bundle prepared, but execution.mode={config.execution.mode!r} is blocked until "
-                "the SSH/TFTP apply gate is implemented."
-            )
+        if dry_run:
+            message = "Bundle prepared successfully; dry-run performed no device changes."
+        elif config.execution.mode == "prepare_only":
+            message = "Bundle prepared successfully; prepare_only performed no device changes."
+        elif config.execution.mode == "approval":
+            message = "Bundle prepared successfully and is awaiting explicit manifest approval."
+        else:
+            message = "Bundle prepared successfully and is eligible for unattended controlled apply."
         return AgentRunResult(
             status="PREPARED",
             source_page=config.source.page_url,
