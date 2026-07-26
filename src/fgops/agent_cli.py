@@ -10,6 +10,7 @@ from pathlib import Path
 from .agent_config import load_agent_config, write_default_config
 from .agent_orchestrator import run_agent_once
 from .agent_state import load_state
+from .backup_test import run_backup_test
 from .controlled_apply import run_controlled_apply
 from .fortigate_preflight import run_read_only_preflight, scan_host_key
 
@@ -52,6 +53,13 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser(
         "preflight",
         help="Run pinned, read-only FortiGate SSH commands and write before-state evidence.",
+    )
+    subparsers.add_parser(
+        "backup-test",
+        help=(
+            "Start temporary TFTP, export one encrypted full configuration backup, "
+            "verify it, and perform no package restore."
+        ),
     )
     apply = subparsers.add_parser(
         "apply",
@@ -126,6 +134,11 @@ def main(argv: list[str] | None = None) -> int:
 
         if args.command == "preflight":
             result = run_read_only_preflight(config)
+            print(json.dumps(result.to_dict(), indent=2, ensure_ascii=False))
+            return 0 if result.status == "PASS" else 2
+
+        if args.command == "backup-test":
+            result = run_backup_test(config)
             print(json.dumps(result.to_dict(), indent=2, ensure_ascii=False))
             return 0 if result.status == "PASS" else 2
 
