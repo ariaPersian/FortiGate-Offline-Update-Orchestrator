@@ -10,6 +10,7 @@ from .agent_state import load_state, save_state, utc_now
 from .downloader import DownloadResult, download_bundle
 from .inventory import build_manifest
 from .source_monitor import DiscoveredLink, discover_download_link, fetch_page
+from .tls import build_tls_context
 
 
 @dataclass(frozen=True)
@@ -60,10 +61,12 @@ def run_agent_once(
     state.last_error = None
 
     try:
+        ssl_context = build_tls_context(config.source.tls_mode, config.source.ca_file)
         page_html = page_fetcher(
             config.source.page_url,
             timeout_seconds=config.source.timeout_seconds,
             user_agent=config.source.user_agent,
+            ssl_context=ssl_context,
         )
         discovered: DiscoveredLink = discover_download_link(
             page_html,
@@ -76,6 +79,7 @@ def run_agent_once(
             timeout_seconds=config.source.timeout_seconds,
             max_download_bytes=config.source.max_download_bytes,
             user_agent=config.source.user_agent,
+            ssl_context=ssl_context,
         )
 
         if state.has_successful_archive(downloaded.sha256):
@@ -115,6 +119,7 @@ def run_agent_once(
                 "download_url": downloaded.source_url,
                 "link_text": discovered.text,
                 "link_context": discovered.context,
+                "tls_mode": config.source.tls_mode,
             },
             "archive": {
                 "path": str(downloaded.path),
