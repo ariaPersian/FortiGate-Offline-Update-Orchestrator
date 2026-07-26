@@ -442,6 +442,17 @@ def run_controlled_apply(
                 }:
                     break
 
+    if backup_path is not None:
+        backup_store = config.storage.evidence_dir / "backups"
+        backup_store.mkdir(parents=True, exist_ok=True)
+        permanent_backup = backup_store / backup_filename
+        if permanent_backup.exists():
+            raise FileExistsError(f"Backup destination already exists: {permanent_backup}")
+        shutil.copy2(backup_path, permanent_backup)
+        if sha256_file(permanent_backup) != sha256_file(backup_path):
+            raise RuntimeError("Permanent backup copy failed SHA-256 verification.")
+        backup_path = permanent_backup
+
     postflight = preflight_runner(config)
     overall = _overall_status(package_results, postflight)
     report_json, report_text = _report_paths(config, manifest_id)
@@ -467,7 +478,7 @@ def run_controlled_apply(
             "bind_address": config.apply.tftp_bind_address,
             "advertise_address": config.apply.tftp_advertise_address,
             "port": config.apply.tftp_port,
-            "root": str(run_root),
+            "ephemeral_root": str(run_root),
         },
         "backup": (
             {
