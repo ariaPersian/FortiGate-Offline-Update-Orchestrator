@@ -2,7 +2,7 @@
 
 **FortiGate Offline Update Orchestrator** automates preparation and controlled delivery of offline FortiGuard signature bundles.
 
-> Current milestone: `v0.4.0`. A standalone VM can monitor the source page, prepare and deduplicate a FortiOS 6.4 bundle, pin and validate the FortiGate SSH host key, create an encrypted full configuration backup through a temporary TFTP service, apply an approved manifest package-by-package, compare before/after database versions, and write audit evidence.
+> Current milestone: `v0.4.1`. A standalone VM can monitor the source page, prepare and deduplicate a FortiOS 6.4 bundle, pin and validate the FortiGate SSH host key, validate encrypted full-config backup delivery independently, and apply an approved manifest package-by-package with before/after evidence.
 
 ## Primary deployment model
 
@@ -13,6 +13,7 @@ scheduled local agent
   -> bounded download + SHA-256 deduplication
   -> safe extraction + package inventory
   -> pinned read-only SSH preflight
+  -> encrypted backup-only validation
   -> exact manifest approval gate
   -> temporary restricted TFTP service
   -> encrypted full-config backup
@@ -55,6 +56,23 @@ fgops-agent --config C:\ProgramData\FGOps\config.yml status
 ```
 
 The URL is rediscovered on each run. A reused URL does not hide a new package because archive identity is the downloaded SHA-256.
+
+## Backup-only validation
+
+Before the first live package restore, validate the exact SSH, global-context, TFTP, encryption, firewall, and persistence path independently:
+
+```powershell
+fgops-agent `
+  --config C:\ProgramData\FGOps\config.yml `
+  backup-test
+```
+
+The command runs preflight, starts the temporary UDP/69 service, exports one encrypted `full-config` backup, verifies the permanent copy with SHA-256, writes JSON/TXT evidence, and removes the temporary TFTP run directory. It never issues `execute restore` and records:
+
+```text
+device_changes_performed: false
+package_restores_performed: 0
+```
 
 ## Controlled apply
 
@@ -116,6 +134,7 @@ fgops-agent validate-config
 fgops-agent run [--dry-run]
 fgops-agent scan-host-key
 fgops-agent preflight
+fgops-agent backup-test
 fgops-agent apply --manifest-id ... [--approve-manifest ...]
 fgops-agent status
 ```
@@ -130,12 +149,13 @@ fgops-agent status
 - temporary TFTP root with exact backup upload basename;
 - encrypted backup required by default;
 - secrets read from environment variables, never YAML;
+- backup-only test before first package restore;
 - fixed package order and stop-on-failure;
 - downgrade detection;
 - preflight/postflight and command-output hashes;
 - atomic local state updates.
 
-See [standalone agent](docs/standalone-agent.md), [read-only preflight](docs/read-only-preflight.md), [controlled apply](docs/controlled-apply.md), [architecture](docs/architecture.md), and [security policy](SECURITY.md).
+See [standalone agent](docs/standalone-agent.md), [read-only preflight](docs/read-only-preflight.md), [backup test](docs/backup-test.md), [controlled apply](docs/controlled-apply.md), [architecture](docs/architecture.md), and [security policy](SECURITY.md).
 
 ## Disclaimer
 
