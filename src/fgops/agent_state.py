@@ -45,7 +45,15 @@ class AgentState:
         }
 
     def has_successful_archive(self, sha256: str) -> bool:
-        return (self.archives.get(sha256) or {}).get("status") in {"PREPARED", "APPLIED"}
+        # APPLY_FAILED/REVIEW_REQUIRED are intentionally treated as already handled.
+        # Re-downloading the same hash must never cause an unattended replay after an
+        # uncertain or partially completed device-changing operation.
+        return (self.archives.get(sha256) or {}).get("status") in {
+            "PREPARED",
+            "APPLIED",
+            "APPLY_FAILED",
+            "REVIEW_REQUIRED",
+        }
 
 
 def load_state(path: Path) -> AgentState:
