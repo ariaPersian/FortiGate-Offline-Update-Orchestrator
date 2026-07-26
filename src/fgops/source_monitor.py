@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import ssl
 from dataclasses import dataclass
 from html.parser import HTMLParser
 from urllib.parse import urljoin, urlparse
@@ -56,6 +57,7 @@ def fetch_page(
     *,
     timeout_seconds: int,
     user_agent: str,
+    ssl_context: ssl.SSLContext | None = None,
 ) -> str:
     request = Request(
         url,
@@ -64,7 +66,11 @@ def fetch_page(
             "Accept": "text/html,application/xhtml+xml",
         },
     )
-    with urlopen(request, timeout=timeout_seconds) as response:  # noqa: S310 - URL is configured by the operator.
+    with urlopen(  # noqa: S310 - URL is configured by the operator.
+        request,
+        timeout=timeout_seconds,
+        context=ssl_context,
+    ) as response:
         content_type = response.headers.get_content_type()
         if content_type not in {"text/html", "application/xhtml+xml"}:
             raise ValueError(f"Source page returned unexpected content type: {content_type}")
