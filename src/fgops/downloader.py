@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import ssl
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import unquote, urlparse
@@ -40,6 +41,7 @@ def download_bundle(
     timeout_seconds: int,
     max_download_bytes: int,
     user_agent: str,
+    ssl_context: ssl.SSLContext | None = None,
 ) -> DownloadResult:
     parsed = urlparse(url)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
@@ -56,7 +58,11 @@ def download_bundle(
 
     temporary: Path | None = None
     try:
-        with urlopen(request, timeout=timeout_seconds) as response:  # noqa: S310 - URL is discovered from the configured source.
+        with urlopen(  # noqa: S310 - URL is discovered from the configured source.
+            request,
+            timeout=timeout_seconds,
+            context=ssl_context,
+        ) as response:
             content_length = response.headers.get("Content-Length")
             if content_length and int(content_length) > max_download_bytes:
                 raise ValueError("Remote bundle exceeds source.max_download_bytes.")
