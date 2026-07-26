@@ -1,0 +1,9 @@
+devices:
+  - name: SITEC-FW-02
+    host: 172.16.1.2
+    ssh_port: 22
+    global_context: true
+    expected_model: FortiGate-300D
+    expected_firmware: 6.4.16-build2098
+    tftp_server: 192.168.1.179
+    runner_labels: [self-hosted, windows, fgops, sitec]
