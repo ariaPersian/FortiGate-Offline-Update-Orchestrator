@@ -10,6 +10,7 @@ from pathlib import Path
 from .agent_config import load_agent_config, write_default_config
 from .agent_orchestrator import run_agent_once
 from .agent_state import load_state
+from .fortigate_preflight import run_read_only_preflight, scan_host_key
 
 
 def default_config_path() -> Path:
@@ -39,6 +40,18 @@ def build_parser() -> argparse.ArgumentParser:
     run = subparsers.add_parser("run", help="Poll, download, extract, and prepare a bundle.")
     run.add_argument("--dry-run", action="store_true")
 
+    scan = subparsers.add_parser(
+        "scan-host-key",
+        help="Read an SSH server host key without authenticating; verify it out of band before use.",
+    )
+    scan.add_argument("--host", required=True)
+    scan.add_argument("--port", type=int, default=22)
+    scan.add_argument("--timeout", type=int, default=10)
+
+    subparsers.add_parser(
+        "preflight",
+        help="Run pinned, read-only FortiGate SSH commands and write before-state evidence.",
+    )
     subparsers.add_parser("status", help="Display local standalone-agent state.")
     subparsers.add_parser("validate-config", help="Validate configuration and paths.")
     return parser
@@ -60,6 +73,11 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps({"config": str(config_path), "package_map": str(target_map)}, indent=2))
             return 0
 
+        if args.command == "scan-host-key":
+            info = scan_host_key(args.host, port=args.port, timeout_seconds=args.timeout)
+            print(json.dumps(info.to_dict(), indent=2))
+            return 0
+
         config = load_agent_config(args.config)
         if args.command == "validate-config":
             print(
@@ -70,7 +88,10 @@ def main(argv: list[str] | None = None) -> int:
                         "source_page": config.source.page_url,
                         "source_tls_mode": config.source.tls_mode,
                         "storage_root": str(config.storage.root),
+                        "evidence_dir": str(config.storage.evidence_dir),
                         "execution_mode": config.execution.mode,
+                        "device_configured": config.device is not None,
+                        "device_host": config.device.host if config.device else None,
                     },
                     indent=2,
                 )
@@ -86,6 +107,11 @@ def main(argv: list[str] | None = None) -> int:
             result = run_agent_once(config, dry_run=args.dry_run)
             print(json.dumps(result.to_dict(), indent=2, ensure_ascii=False))
             return 0
+
+        if args.command == "preflight":
+            result = run_read_only_preflight(config)
+            print(json.dumps(result.to_dict(), indent=2, ensure_ascii=False))
+            return 0 if result.status == "PASS" else 2
 
         raise AssertionError(f"Unhandled command: {args.command}")
     except Exception as exc:
