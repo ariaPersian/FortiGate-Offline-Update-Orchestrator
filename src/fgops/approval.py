@@ -52,7 +52,9 @@ def parse_approval_command(text: str) -> ApprovalCommand:
     elif command == "schedule":
         if not argument:
             raise ValueError("/fg schedule requires an ISO-8601 date and time.")
-        datetime.fromisoformat(argument)
+        scheduled = datetime.fromisoformat(argument)
+        if scheduled.tzinfo is None or scheduled.utcoffset() is None:
+            raise ValueError("/fg schedule requires an explicit UTC offset.")
     elif command == "reject" and not argument:
         raise ValueError("/fg reject requires a reason.")
     elif argument and command not in {"reject", "snooze", "schedule"}:
@@ -68,7 +70,9 @@ def load_policy(path: Path) -> ApprovalPolicy:
         raise ValueError(f"Unsupported approval mode: {mode}")
     timezone_name = str(approval.get("timezone", "UTC"))
     ZoneInfo(timezone_name)
-    reminders = tuple(parse_duration(str(value)) for value in approval.get("reminders", []))
+    reminders = tuple(
+        sorted({parse_duration(str(value)) for value in approval.get("reminders", [])})
+    )
     repeat_every = (
         parse_duration(str(approval["repeat_every"])) if approval.get("repeat_every") else None
     )
