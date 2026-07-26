@@ -1,0 +1,22 @@
+# Copy this file outside the repository before adding production values.
+package_map: fortios64-package-map.yml
+
+source:
+  page_url: "https://www.cyberlogic.ir/%D8%A8%D8%B1%D9%88%D8%B2-%D8%B1%D8%B3%D8%A7%D9%86%DB%8C-%D8%A2%D9%81%D9%84%D8%A7%DB%8C%D9%86-fortigate-%D9%88-fortiweb/"
+  link_text_regex: '(?i)Fortigate\s+V6\.4'
+  timeout_seconds: 60
+  max_download_bytes: 536870912
+
+storage:
+  root: C:/ProgramData/FGOps
+  incoming: incoming
+  quarantine: quarantine
+  reports: reports
+  state_file: state/agent-state.json
+
+execution:
+  # v0.2 prepares the bundle locally. SSH/TFTP apply is added behind a later gate.
+  mode: prepare_only
+  enabled_packages: [AV, IPS, APDB, FFDB, MCDB, MMDB]
+  reject_unknown_packages: true
+  prevent_downgrade: true
