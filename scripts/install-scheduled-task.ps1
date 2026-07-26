@@ -22,9 +22,14 @@ $action = New-ScheduledTaskAction `
     -Execute $agent `
     -Argument ('--config "{0}" run' -f $config)
 
-$trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(2)
-$trigger.Repetition.Interval = "PT${IntervalHours}H"
-$trigger.Repetition.Duration = "P3650D"
+# Pass repetition settings when constructing the trigger. On some Windows
+# PowerShell 5.1 / ScheduledTasks module versions, the returned CIM instance
+# does not expose a mutable Repetition.Interval property.
+$trigger = New-ScheduledTaskTrigger `
+    -Once `
+    -At (Get-Date).AddMinutes(2) `
+    -RepetitionInterval (New-TimeSpan -Hours $IntervalHours) `
+    -RepetitionDuration (New-TimeSpan -Days 3650)
 
 $settings = New-ScheduledTaskSettingsSet `
     -StartWhenAvailable `
