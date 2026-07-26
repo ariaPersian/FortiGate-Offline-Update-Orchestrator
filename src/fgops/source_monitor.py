@@ -16,40 +16,61 @@ class DiscoveredLink:
 
 
 class _LinkParser(HTMLParser):
+    """Collect links with context limited to their nearest semantic item.
+
+    A rolling page-wide text window causes a version label from one list item
+    to leak into all following links. Cyberlogic renders each product/version
+    as a separate ``li`` whose anchor text is only ``دانلود``. Restricting the
+    context to the nearest list/paragraph/table item binds each link to the
+    correct product and version without relying on page order.
+    """
+
+    _CONTEXT_TAGS = {"li", "p", "td", "th", "dt", "dd"}
+
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
-        self._recent_text = ""
+        self._contexts: list[tuple[str, list[str]]] = []
         self._active_href: str | None = None
-        self._active_before = ""
         self._active_text: list[str] = []
         self.links: list[tuple[str, str, str]] = []
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        if tag.lower() != "a" or self._active_href is not None:
+        normalized_tag = tag.lower()
+        if normalized_tag in self._CONTEXT_TAGS:
+            self._contexts.append((normalized_tag, []))
+
+        if normalized_tag != "a" or self._active_href is not None:
             return
         href = next((value for key, value in attrs if key.lower() == "href"), None)
         if href:
             self._active_href = href
-            self._active_before = self._recent_text[-240:]
             self._active_text = []
 
     def handle_data(self, data: str) -> None:
         normalized = " ".join(data.split())
         if not normalized:
             return
-        self._recent_text = f"{self._recent_text} {normalized}"[-480:]
+        for _, parts in self._contexts:
+            parts.append(normalized)
         if self._active_href is not None:
             self._active_text.append(normalized)
 
     def handle_endtag(self, tag: str) -> None:
-        if tag.lower() != "a" or self._active_href is None:
-            return
-        text = " ".join(self._active_text).strip()
-        context = " ".join(f"{self._active_before} {text}".split())
-        self.links.append((self._active_href, text, context))
-        self._active_href = None
-        self._active_before = ""
-        self._active_text = []
+        normalized_tag = tag.lower()
+        if normalized_tag == "a" and self._active_href is not None:
+            text = " ".join(self._active_text).strip()
+            context = text
+            if self._contexts:
+                context = " ".join(self._contexts[-1][1]).strip()
+            self.links.append((self._active_href, text, context))
+            self._active_href = None
+            self._active_text = []
+
+        if normalized_tag in self._CONTEXT_TAGS:
+            for index in range(len(self._contexts) - 1, -1, -1):
+                if self._contexts[index][0] == normalized_tag:
+                    del self._contexts[index:]
+                    break
 
 
 def fetch_page(
