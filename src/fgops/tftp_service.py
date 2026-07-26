@@ -4,7 +4,7 @@ import shutil
 import socket
 import threading
 import time
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Callable, Iterable
 
 import tftpy
@@ -38,12 +38,12 @@ class TemporaryTftpServer:
         self._error: BaseException | None = None
 
     def _upload_open(self, requested_path: str, _context: object):
-        requested = Path(requested_path)
+        normalized = requested_path.replace("\\", "/")
+        requested = PurePosixPath(normalized)
         name = requested.name
         if (
             self.allowed_upload_name is None
             or name != self.allowed_upload_name
-            or requested.is_absolute()
             or ".." in requested.parts
         ):
             return None
