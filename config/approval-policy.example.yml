@@ -1,0 +1,12 @@
+approval:
+  mode: grace_period
+  timezone: Asia/Tehran
+  reminders: [1h, 6h, 24h]
+  repeat_every: 24h
+  timeout: 7d
+  grace_period: 24h
+  on_timeout: apply_safe_only
+  safe_package_kinds: [AV, IPS, APDB, FFDB, MCDB, MMDB]
+
+  # Firmware and downgrade operations are deliberately outside the v0.1
+  # auto-apply scope and always require a separate explicit workflow.
