@@ -88,7 +88,6 @@ def _protect_bytes(data: bytes) -> bytes:
     input_blob, input_buffer = _make_blob(data)
     entropy_blob, entropy_buffer = _make_blob(_ENTROPY)
     output_blob = _DataBlob()
-    del input_buffer, entropy_buffer
     ok = crypt32.CryptProtectData(
         ctypes.byref(input_blob),
         "FGOps machine secret",
@@ -98,6 +97,8 @@ def _protect_bytes(data: bytes) -> bytes:
         _CRYPTPROTECT_UI_FORBIDDEN | _CRYPTPROTECT_LOCAL_MACHINE,
         ctypes.byref(output_blob),
     )
+    # Keep the Python-owned buffers alive until the native call has returned.
+    _ = input_buffer, entropy_buffer
     if not ok:
         raise ctypes.WinError(ctypes.get_last_error())
     try:
@@ -111,7 +112,6 @@ def _unprotect_bytes(data: bytes) -> bytes:
     input_blob, input_buffer = _make_blob(data)
     entropy_blob, entropy_buffer = _make_blob(_ENTROPY)
     output_blob = _DataBlob()
-    del input_buffer, entropy_buffer
     ok = crypt32.CryptUnprotectData(
         ctypes.byref(input_blob),
         None,
@@ -121,6 +121,7 @@ def _unprotect_bytes(data: bytes) -> bytes:
         _CRYPTPROTECT_UI_FORBIDDEN,
         ctypes.byref(output_blob),
     )
+    _ = input_buffer, entropy_buffer
     if not ok:
         raise ctypes.WinError(ctypes.get_last_error())
     try:
