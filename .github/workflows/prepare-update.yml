@@ -1,4 +1,4 @@
-name: Prepare offline update
+name: Prepare offline update approval
 
 on:
   workflow_dispatch:
@@ -8,17 +8,41 @@ on:
         required: true
         type: string
       device_name:
-        description: Device key from config/devices.yml
+        description: Immutable device name bound into the approval
         required: true
         default: SITEC-FW-02
+        type: string
+      expected_model:
+        description: Expected FortiGate model
+        required: true
+        default: FortiGate-300D
+        type: string
+      expected_firmware:
+        description: Expected FortiOS version and build
+        required: true
+        default: 6.4.16-build2098
+        type: string
+      approvers:
+        description: Comma-separated GitHub logins authorized to approve
+        required: true
+        default: ariaPersian
+        type: string
+      expires_in:
+        description: Approval lifetime such as 24h or 7d
+        required: true
+        default: 7d
         type: string
 
 permissions:
   contents: read
   issues: write
 
+concurrency:
+  group: fgops-prepare-${{ inputs.device_name }}
+  cancel-in-progress: false
+
 jobs:
-  prepare:
+  inventory:
     runs-on: [self-hosted, windows, fgops, sitec]
     steps:
       - uses: actions/checkout@v6
@@ -34,8 +58,76 @@ jobs:
           "${{ inputs.bundle_path }}"
           --output "$env:RUNNER_TEMP\fgops-${{ github.run_id }}"
           --package-map "config\fortios64-package-map.yml"
-      - name: Safety boundary
+      - name: Upload manifest only
+        uses: actions/upload-artifact@v4
+        with:
+          name: fgops-manifest-${{ github.run_id }}
+          path: ${{ runner.temp }}\fgops-${{ github.run_id }}\manifest.json
+          if-no-files-found: error
+          retention-days: 7
+      - name: Confirm non-applying boundary
         shell: pwsh
         run: |
-          Write-Host "Preparation completed. No FortiGate command was executed."
-          Write-Host "Apply remains disabled until approval persistence and binding are tested."
+          Write-Host "Only package metadata and hashes were uploaded."
+          Write-Host "No package payload or FortiGate command was sent."
+
+  create-approval:
+    needs: inventory
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - run: python -m pip install -e .
+      - uses: actions/download-artifact@v4
+        with:
+          name: fgops-manifest-${{ github.run_id }}
+          path: approval-input
+      - name: Create durable signed approval issue
+        id: approval
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FGOPS_APPROVAL_HMAC_KEY: ${{ secrets.FGOPS_APPROVAL_HMAC_KEY }}
+          APPROVERS: ${{ inputs.approvers }}
+        run: |
+          set -euo pipefail
+          test -n "$FGOPS_APPROVAL_HMAC_KEY" || {
+            echo "FGOPS_APPROVAL_HMAC_KEY is not configured." >&2
+            exit 1
+          }
+
+          issue_url=$(gh issue create \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "[FGOps] Pending offline update for ${{ inputs.device_name }}" \
+            --body "Initializing HMAC-bound approval state.")
+          issue_number=${issue_url##*/}
+
+          approver_args=()
+          IFS=',' read -ra values <<< "$APPROVERS"
+          for value in "${values[@]}"; do
+            trimmed=$(echo "$value" | xargs)
+            test -n "$trimmed" && approver_args+=(--approver "$trimmed")
+          done
+
+          fgops approval-init approval-input/manifest.json \
+            --repository "$GITHUB_REPOSITORY" \
+            --issue-number "$issue_number" \
+            --device-name "${{ inputs.device_name }}" \
+            --expected-model "${{ inputs.expected_model }}" \
+            --expected-firmware "${{ inputs.expected_firmware }}" \
+            --expires-in "${{ inputs.expires_in }}" \
+            "${approver_args[@]}" \
+            --output-body approval-body.md
+
+          gh issue edit "$issue_number" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "[FGOps] ${{ inputs.device_name }} offline update approval" \
+            --body-file approval-body.md
+
+          echo "issue_number=$issue_number" >> "$GITHUB_OUTPUT"
+          echo "Created approval issue #$issue_number"
+      - name: Safety boundary
+        run: |
+          echo "Approval persistence is active."
+          echo "SSH, TFTP, restore commands, firmware changes, and downgrade remain disabled."

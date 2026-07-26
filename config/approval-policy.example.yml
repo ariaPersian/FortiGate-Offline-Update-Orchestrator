@@ -1,6 +1,11 @@
 approval:
   mode: grace_period
   timezone: Asia/Tehran
+
+  # GitHub logins are copied into each signed approval record when the
+  # preparation workflow is launched. The workflow input may override this list.
+  approvers: [ariaPersian]
+
   reminders: [1h, 6h, 24h]
   repeat_every: 24h
   timeout: 7d

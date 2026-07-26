@@ -1,4 +1,4 @@
-name: Approval command validation
+name: Reconcile approval commands
 
 on:
   issue_comment:
@@ -8,12 +8,15 @@ permissions:
   contents: read
   issues: write
 
+concurrency:
+  group: fgops-approval-state
+  cancel-in-progress: false
+
 jobs:
-  validate:
+  reconcile:
     if: >-
       ${{ !github.event.issue.pull_request &&
-          startsWith(github.event.comment.body, '/fg ') &&
-          contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association) }}
+          startsWith(github.event.comment.body, '/fg ') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -21,15 +24,51 @@ jobs:
         with:
           python-version: "3.12"
       - run: python -m pip install -e .
-      - name: Validate command grammar
+      - name: Fetch canonical issue and complete command history
         env:
-          FGOPS_COMMAND: ${{ github.event.comment.body }}
-        run: fgops approval-command "$FGOPS_COMMAND"
-      - name: Record validation response
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh api "repos/$REPOSITORY/issues/$ISSUE_NUMBER" --jq .body > issue.md
+          gh api --paginate --slurp \
+            "repos/$REPOSITORY/issues/$ISSUE_NUMBER/comments?per_page=100" \
+            | jq 'add' > comments.json
+      - name: Verify signed state and reconcile every unprocessed command
+        env:
+          FGOPS_APPROVAL_HMAC_KEY: ${{ secrets.FGOPS_APPROVAL_HMAC_KEY }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          fgops approval-reconcile issue.md comments.json \
+            --repository "$REPOSITORY" \
+            --issue-number "$ISSUE_NUMBER" \
+            --output-body updated-issue.md \
+            --output-response response.md \
+            > result.json
+      - name: Persist reconciled state
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if test "$(jq -r .changed result.json)" = "true"; then
+            gh issue edit "$ISSUE_NUMBER" \
+              --repo "$REPOSITORY" \
+              --body-file updated-issue.md
+          fi
+          gh issue comment "$ISSUE_NUMBER" \
+            --repo "$REPOSITORY" \
+            --body-file response.md
+      - name: Record fail-closed rejection
+        if: failure()
         env:
           GH_TOKEN: ${{ github.token }}
           ISSUE_NUMBER: ${{ github.event.issue.number }}
           REPOSITORY: ${{ github.repository }}
         run: >-
           gh issue comment "$ISSUE_NUMBER" --repo "$REPOSITORY"
-          --body "FGOps accepted the command syntax. State mutation will be enabled after the persistence layer is merged."
+          --body "FGOps rejected the command because signed-state verification or deterministic reconciliation failed. No device action was attempted."

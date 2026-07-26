@@ -10,6 +10,10 @@ permissions:
   contents: read
   issues: write
 
+concurrency:
+  group: fgops-approval-state
+  cancel-in-progress: false
+
 jobs:
   watchdog:
     runs-on: ubuntu-latest
@@ -19,7 +23,70 @@ jobs:
         with:
           python-version: "3.12"
       - run: python -m pip install -e .
-      - name: Non-applying v0.1 safety boundary
+      - name: Reconcile comments, expiry, snooze, schedules, and reminders
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FGOPS_APPROVAL_HMAC_KEY: ${{ secrets.FGOPS_APPROVAL_HMAC_KEY }}
+          REPOSITORY: ${{ github.repository }}
         run: |
-          echo "The v0.1 watchdog is intentionally non-applying."
-          echo "Persistence, reminders, and safe-package dispatch are implemented in later milestones."
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/fgops-watchdog"
+          cd "$RUNNER_TEMP/fgops-watchdog"
+
+          gh issue list \
+            --repo "$REPOSITORY" \
+            --state open \
+            --limit 100 \
+            --json number,body \
+            | jq -c '.[] | select(.body | contains("FGOPS_APPROVAL_STATE_V1"))' \
+            > approvals.jsonl
+
+          while IFS= read -r approval; do
+            test -n "$approval" || continue
+            issue_number=$(jq -r .number <<< "$approval")
+            jq -r .body <<< "$approval" > issue.md
+            gh api --paginate --slurp \
+              "repos/$REPOSITORY/issues/$issue_number/comments?per_page=100" \
+              | jq 'add' > comments.json
+
+            fgops approval-reconcile issue.md comments.json \
+              --repository "$REPOSITORY" \
+              --issue-number "$issue_number" \
+              --output-body reconciled.md \
+              --output-response reconcile-response.md \
+              > reconcile.json
+
+            if test "$(jq -r .changed reconcile.json)" = "true"; then
+              cp reconciled.md issue.md
+              gh issue edit "$issue_number" \
+                --repo "$REPOSITORY" \
+                --body-file issue.md
+              gh issue comment "$issue_number" \
+                --repo "$REPOSITORY" \
+                --body-file reconcile-response.md
+            fi
+
+            fgops approval-watchdog issue.md \
+              --repository "$REPOSITORY" \
+              --issue-number "$issue_number" \
+              --policy "$GITHUB_WORKSPACE/config/approval-policy.example.yml" \
+              --output-body watchdog.md \
+              --output-response watchdog-response.md \
+              > watchdog.json
+
+            if test "$(jq -r .changed watchdog.json)" = "true"; then
+              gh issue edit "$issue_number" \
+                --repo "$REPOSITORY" \
+                --body-file watchdog.md
+            fi
+
+            if test "$(jq -r '.reminder_due or .changed' watchdog.json)" = "true"; then
+              gh issue comment "$issue_number" \
+                --repo "$REPOSITORY" \
+                --body-file watchdog-response.md
+            fi
+          done < approvals.jsonl
+      - name: Confirm non-applying boundary
+        run: |
+          echo "The watchdog only mutates signed approval state and issue audit records."
+          echo "No FortiGate network or configuration action is implemented."
