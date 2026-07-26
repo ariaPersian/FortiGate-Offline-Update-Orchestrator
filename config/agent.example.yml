@@ -6,6 +6,11 @@ source:
   link_text_regex: '(?i)Fortigate\s+V6\.4'
   timeout_seconds: 60
   max_download_bytes: 536870912
+  # system uses the native OS trust store (Windows CryptoAPI on Windows).
+  tls_mode: system
+  # For a private or enterprise PEM bundle:
+  # tls_mode: custom
+  # ca_file: C:/ProgramData/FGOps/certs/organization-ca.pem
 
 storage:
   root: C:/ProgramData/FGOps
