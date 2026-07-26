@@ -10,6 +10,7 @@ from pathlib import Path
 from .agent_config import load_agent_config, write_default_config
 from .agent_orchestrator import run_agent_once
 from .agent_state import load_state
+from .controlled_apply import run_controlled_apply
 from .fortigate_preflight import run_read_only_preflight, scan_host_key
 
 
@@ -52,6 +53,16 @@ def build_parser() -> argparse.ArgumentParser:
         "preflight",
         help="Run pinned, read-only FortiGate SSH commands and write before-state evidence.",
     )
+    apply = subparsers.add_parser(
+        "apply",
+        help="Back up and apply one prepared manifest through temporary TFTP and pinned SSH.",
+    )
+    apply.add_argument("--manifest-id", required=True)
+    apply.add_argument(
+        "--approve-manifest",
+        help="Required in approval mode and must exactly equal --manifest-id.",
+    )
+
     subparsers.add_parser("status", help="Display local standalone-agent state.")
     subparsers.add_parser("validate-config", help="Validate configuration and paths.")
     return parser
@@ -89,9 +100,14 @@ def main(argv: list[str] | None = None) -> int:
                         "source_tls_mode": config.source.tls_mode,
                         "storage_root": str(config.storage.root),
                         "evidence_dir": str(config.storage.evidence_dir),
+                        "tftp_dir": str(config.storage.tftp_dir),
                         "execution_mode": config.execution.mode,
                         "device_configured": config.device is not None,
                         "device_host": config.device.host if config.device else None,
+                        "apply_configured": config.apply is not None,
+                        "tftp_advertise_address": (
+                            config.apply.tftp_advertise_address if config.apply else None
+                        ),
                     },
                     indent=2,
                 )
@@ -112,6 +128,15 @@ def main(argv: list[str] | None = None) -> int:
             result = run_read_only_preflight(config)
             print(json.dumps(result.to_dict(), indent=2, ensure_ascii=False))
             return 0 if result.status == "PASS" else 2
+
+        if args.command == "apply":
+            result = run_controlled_apply(
+                config,
+                manifest_id=args.manifest_id,
+                approval_manifest=args.approve_manifest,
+            )
+            print(json.dumps(result.to_dict(), indent=2, ensure_ascii=False))
+            return 0 if result.status != "FAILED" else 2
 
         raise AssertionError(f"Unhandled command: {args.command}")
     except Exception as exc:
