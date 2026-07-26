@@ -70,9 +70,7 @@ def _prepared_message(config: AgentConfig, result: AgentRunResult) -> str:
 
 
 def _apply_message(config: AgentConfig, result: ControlledApplyResult) -> str:
-    packages = ", ".join(
-        f"{item.kind}={item.status.value}" for item in result.package_results
-    )
+    packages = ", ".join(f"{item.kind}={item.status.value}" for item in result.package_results)
     return "\n".join(
         [
             f"FGOps controlled apply completed: {result.status}",
@@ -183,18 +181,32 @@ def _retry_pending_prepared_notification(
     )
 
 
+def _mark_review_required(config: AgentConfig, monitor: AgentRunResult, error: str) -> None:
+    if not monitor.archive_sha256:
+        return
+    state = load_state(config.storage.state_file)
+    entry = state.archives.get(monitor.archive_sha256)
+    if entry is None:
+        return
+    entry.update(
+        {
+            "status": "REVIEW_REQUIRED",
+            "apply_failed_at": utc_now(),
+            "apply_error": error,
+        }
+    )
+    state.last_run_at = utc_now()
+    state.last_result = "FAILED"
+    state.last_error = error
+    save_state(config.storage.state_file, state)
+
+
 def run_cycle(config: AgentConfig) -> CycleResult:
     policy = load_runtime_policy(config.config_path, config.storage.root)
     notifications: list[NotificationResult] = []
     try:
         monitor = run_agent_once(config, dry_run=False)
     except Exception as exc:
-        failed = AgentRunResult(
-            status="FAILED",
-            source_page=config.source.page_url,
-            download_url="",
-            message=str(exc),
-        )
         notification = _notify_best_effort(
             config,
             policy,
@@ -228,8 +240,25 @@ def run_cycle(config: AgentConfig) -> CycleResult:
 
     apply_result: ControlledApplyResult | None = None
     if config.execution.mode == "unattended":
-        with secret_environment(policy.secret_store, _apply_secret_names(config)):
-            apply_result = run_controlled_apply(config, manifest_id=monitor.manifest_id)
+        try:
+            with secret_environment(policy.secret_store, _apply_secret_names(config)):
+                apply_result = run_controlled_apply(config, manifest_id=monitor.manifest_id)
+        except Exception as exc:
+            _mark_review_required(config, monitor, str(exc))
+            failure_notification = _notify_best_effort(
+                config,
+                policy,
+                status="FAILED",
+                text=(
+                    "FGOps unattended apply stopped and requires review.\n"
+                    f"Manifest: {monitor.manifest_id}\nError: {exc}"
+                ),
+                archive_sha256=monitor.archive_sha256,
+            )
+            if failure_notification:
+                notifications.append(failure_notification)
+            return CycleResult("FAILED", monitor, None, tuple(notifications))
+
         final_notification = _notify_best_effort(
             config,
             policy,
@@ -240,9 +269,13 @@ def run_cycle(config: AgentConfig) -> CycleResult:
         if final_notification:
             notifications.append(final_notification)
 
+    notification_failed = any(item.status == "FAILED" for item in notifications)
     if apply_result is not None:
-        overall = apply_result.status
-    elif any(item.status == "FAILED" for item in notifications):
+        if notification_failed and apply_result.status != "FAILED":
+            overall = "SUCCESS_WITH_NOTIFICATION_ERROR"
+        else:
+            overall = apply_result.status
+    elif notification_failed:
         overall = "PREPARED_WITH_NOTIFICATION_ERROR"
     else:
         overall = "PREPARED"
@@ -253,12 +286,42 @@ def approve_manifest(config: AgentConfig, manifest_id: str) -> CycleResult:
     if config.execution.mode != "approval":
         raise ValueError("The approve command requires execution.mode=approval.")
     policy = load_runtime_policy(config.config_path, config.storage.root)
-    with secret_environment(policy.secret_store, _apply_secret_names(config)):
-        apply_result = run_controlled_apply(
-            config,
-            manifest_id=manifest_id,
-            approval_manifest=manifest_id,
+    try:
+        with secret_environment(policy.secret_store, _apply_secret_names(config)):
+            apply_result = run_controlled_apply(
+                config,
+                manifest_id=manifest_id,
+                approval_manifest=manifest_id,
+            )
+    except Exception as exc:
+        state = load_state(config.storage.state_file)
+        archive_sha256 = next(
+            (
+                archive_hash
+                for archive_hash, entry in state.archives.items()
+                if entry.get("manifest_id") == manifest_id
+            ),
+            None,
         )
+        failure_notification = _notify_best_effort(
+            config,
+            policy,
+            status="FAILED",
+            text=f"FGOps approved apply failed.\nManifest: {manifest_id}\nError: {exc}",
+            archive_sha256=archive_sha256,
+        )
+        if archive_sha256:
+            monitor = AgentRunResult(
+                status="NO_CHANGE",
+                source_page=config.source.page_url,
+                download_url="",
+                archive_sha256=archive_sha256,
+                manifest_id=manifest_id,
+                message="Manual approval apply failed.",
+            )
+            _mark_review_required(config, monitor, str(exc))
+        raise
+
     state = load_state(config.storage.state_file)
     archive_sha256 = next(
         (
@@ -283,8 +346,13 @@ def approve_manifest(config: AgentConfig, manifest_id: str) -> CycleResult:
         manifest_id=manifest_id,
         message="Manual approval apply.",
     )
+    overall = (
+        "SUCCESS_WITH_NOTIFICATION_ERROR"
+        if notification and notification.status == "FAILED" and apply_result.status != "FAILED"
+        else apply_result.status
+    )
     return CycleResult(
-        apply_result.status,
+        overall,
         placeholder,
         apply_result,
         (notification,) if notification else (),
