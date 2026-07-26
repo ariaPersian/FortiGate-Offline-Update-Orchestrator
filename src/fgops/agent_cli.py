@@ -68,6 +68,7 @@ def main(argv: list[str] | None = None) -> int:
                         "valid": True,
                         "config": str(config.config_path),
                         "source_page": config.source.page_url,
+                        "source_tls_mode": config.source.tls_mode,
                         "storage_root": str(config.storage.root),
                         "execution_mode": config.execution.mode,
                     },
