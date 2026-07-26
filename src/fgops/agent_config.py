@@ -21,6 +21,8 @@ class SourceConfig:
     timeout_seconds: int = 60
     max_download_bytes: int = 512 * 1024 * 1024
     user_agent: str = "FGOps/0.2 (+offline-update-monitor)"
+    tls_mode: str = "system"
+    ca_file: Path | None = None
 
     def validate(self) -> None:
         parsed = urlparse(self.page_url)
@@ -31,6 +33,13 @@ class SourceConfig:
             raise ValueError("source.timeout_seconds must be between 5 and 600.")
         if not 1024 * 1024 <= self.max_download_bytes <= 4 * 1024**3:
             raise ValueError("source.max_download_bytes must be between 1 MiB and 4 GiB.")
+        if self.tls_mode not in {"system", "python", "custom"}:
+            raise ValueError("source.tls_mode must be system, python, or custom.")
+        if self.tls_mode == "custom":
+            if self.ca_file is None:
+                raise ValueError("source.ca_file is required when source.tls_mode is custom.")
+            if not self.ca_file.is_file():
+                raise ValueError(f"Configured source.ca_file does not exist: {self.ca_file}")
 
 
 @dataclass(frozen=True)
@@ -102,18 +111,24 @@ def load_agent_config(path: Path) -> AgentConfig:
         reports=_resolve(root, storage_raw.get("reports", "reports")),
         state_file=_resolve(root, storage_raw.get("state_file", "state/agent-state.json")),
     )
+    ca_value = source_raw.get("ca_file")
     source = SourceConfig(
         page_url=str(source_raw.get("page_url", _DEFAULT_SOURCE_URL)),
         link_text_regex=str(source_raw.get("link_text_regex", r"(?i)Fortigate\s+V6\.4")),
         timeout_seconds=int(source_raw.get("timeout_seconds", 60)),
         max_download_bytes=int(source_raw.get("max_download_bytes", 512 * 1024 * 1024)),
         user_agent=str(source_raw.get("user_agent", "FGOps/0.2 (+offline-update-monitor)")),
+        tls_mode=str(source_raw.get("tls_mode", "system")).strip().lower(),
+        ca_file=_resolve(base, ca_value) if ca_value else None,
     )
     execution = ExecutionConfig(
         mode=str(execution_raw.get("mode", "prepare_only")),
-        enabled_packages=tuple(str(value).upper() for value in execution_raw.get(
-            "enabled_packages", ["AV", "IPS", "APDB", "FFDB", "MCDB", "MMDB"]
-        )),
+        enabled_packages=tuple(
+            str(value).upper()
+            for value in execution_raw.get(
+                "enabled_packages", ["AV", "IPS", "APDB", "FFDB", "MCDB", "MMDB"]
+            )
+        ),
         reject_unknown_packages=bool(execution_raw.get("reject_unknown_packages", True)),
         prevent_downgrade=bool(execution_raw.get("prevent_downgrade", True)),
     )
@@ -137,6 +152,10 @@ source:
   link_text_regex: '(?i)Fortigate\\s+V6\\.4'
   timeout_seconds: 60
   max_download_bytes: 536870912
+  # system uses the OS trust store; on Windows this uses CryptoAPI.
+  tls_mode: system
+  # For an operator-managed PEM bundle use tls_mode: custom and set ca_file.
+  # ca_file: C:/ProgramData/FGOps/certs/organization-ca.pem
 
 storage:
   root: C:/ProgramData/FGOps
