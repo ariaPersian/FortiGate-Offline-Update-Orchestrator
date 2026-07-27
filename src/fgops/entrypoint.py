@@ -59,8 +59,13 @@ def _classify_with_successful_no_change(**kwargs):
 _ORIGINAL_CLASSIFIER = controlled_apply.classify_package_result
 
 
-def install_runtime_guards() -> None:
+def install_prompt_guard() -> None:
+    """Install only the CLI prompt guard; retained as a stable public test hook."""
     fortigate_preflight._PROMPT_RE = _PROMPT_RE
+
+
+def install_runtime_guards() -> None:
+    install_prompt_guard()
     controlled_apply.classify_package_result = _classify_with_successful_no_change
 
 
