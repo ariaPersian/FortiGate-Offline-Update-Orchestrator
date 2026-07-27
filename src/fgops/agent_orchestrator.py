@@ -84,6 +84,32 @@ def run_agent_once(
 
         if state.has_successful_archive(downloaded.sha256):
             entry = state.archives.get(downloaded.sha256) or {}
+            resumable_unattended = (
+                config.execution.mode == "unattended"
+                and not dry_run
+                and entry.get("status") == "PREPARED"
+                and bool(entry.get("manifest_id"))
+                and bool(entry.get("work_dir"))
+            )
+            if resumable_unattended:
+                state.last_result = "PREPARED"
+                save_state(config.storage.state_file, state)
+                return AgentRunResult(
+                    status="PREPARED",
+                    source_page=config.source.page_url,
+                    download_url=downloaded.source_url,
+                    archive_sha256=downloaded.sha256,
+                    archive_path=str(entry.get("archive_path") or downloaded.path),
+                    manifest_id=str(entry["manifest_id"]),
+                    work_dir=str(entry["work_dir"]),
+                    planned_packages=tuple(
+                        str(item) for item in entry.get("planned_packages", [])
+                    ),
+                    message=(
+                        "Resuming a previously prepared archive for unattended controlled apply."
+                    ),
+                )
+
             state.last_result = "NO_CHANGE"
             save_state(config.storage.state_file, state)
             return AgentRunResult(
