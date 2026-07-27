@@ -2,6 +2,8 @@
 
 `fgops-agent preflight` records and validates the FortiGate state before backup or package application. It does not start TFTP, answer restore prompts, change configuration, or issue firmware-update commands.
 
+In v0.5.5, the command also records start, result, exit code, and any exception in the daily runtime journal.
+
 ## Security model
 
 - The FortiGate SSH host key is pinned by its OpenSSH-style `SHA256:<base64>` fingerprint.
@@ -10,6 +12,7 @@
 - Authentication secrets are read from the configured environment-variable names; scheduled execution loads those values temporarily from the encrypted local secret store.
 - Device commands are restricted to a hard-coded read-only allowlist.
 - Evidence stores the command output and SHA-256 hash of each output.
+- Daily logs contain operational metadata and result payloads, never plaintext secret values.
 
 `scan-host-key` reads the key presented by the network endpoint. The displayed fingerprint must be verified through a separate trusted path before it is copied into `config.yml`.
 
@@ -52,7 +55,7 @@ device:
   expected_hostname: REPLACE_WITH_EXPECTED_HOSTNAME
   expected_model: REPLACE_WITH_EXPECTED_MODEL
   expected_firmware_branch: "6.4"
-  expected_build: 0
+  expected_build: 2098
   global_context: true
 ```
 
@@ -70,7 +73,7 @@ Use the least-privileged administrator profile that still supports the required 
   secret status
 ```
 
-For a one-time interactive diagnostic, the configured environment variable may be set in the current PowerShell process. Do not embed a password in the repository, YAML, Scheduled Task command line, or persistent plaintext machine environment.
+For a one-time interactive diagnostic, the configured environment variable may be set in the current PowerShell process. Do not embed a password in the repository, YAML, Scheduled Task command line, persistent plaintext machine environment, report, or log.
 
 ## 4. Run preflight
 
@@ -112,6 +115,24 @@ Evidence includes:
 - `device_changes_performed: false`.
 
 Reports can contain operationally sensitive target identity and version information. Keep them outside Git and protect them with the host access and retention policy.
+
+## Daily log correlation
+
+The same command writes a structured event to:
+
+```text
+C:\ProgramData\FGOps\logs\fgops-YYYY-MM-DD.log
+```
+
+Search for recent preflight results:
+
+```powershell
+Select-String `
+  -Path "C:\ProgramData\FGOps\logs\fgops-*.log" `
+  -Pattern '"event": "preflight.completed"|"event": "command.failed"'
+```
+
+The daily log identifies when the command ran, its exit code, and the evidence path returned by the command. The JSON/TXT evidence remains the authoritative detailed command record.
 
 ## Required interpretation
 
