@@ -1,23 +1,24 @@
 # Read-only FortiGate preflight
 
-FGOps v0.3 adds an SSH preflight that records the FortiGate state before any package-application milestone. It does not start TFTP, answer restore prompts, change configuration, or execute firmware updates.
+`fgops-agent preflight` records and validates the FortiGate state before backup or package application. It does not start TFTP, answer restore prompts, change configuration, or issue firmware-update commands.
 
 ## Security model
 
 - The FortiGate SSH host key is pinned by its OpenSSH-style `SHA256:<base64>` fingerprint.
-- Unknown or changed host keys are rejected. FGOps does not use Paramiko `AutoAddPolicy`.
-- Authentication secrets are read from an environment variable or an operator-managed private-key file; passwords are not stored in YAML or evidence.
-- Device commands are restricted by a hard-coded read-only allowlist.
-- Evidence records the exact outputs and SHA-256 hash of each output.
+- Unknown or changed host keys are rejected; FGOps does not automatically trust a newly presented key.
+- The configured hostname, model, FortiOS branch/build, VDOM mode, and HA mode are collected and expected identity fields are validated.
+- Authentication secrets are read from the configured environment-variable names; scheduled execution loads those values temporarily from the encrypted local secret store.
+- Device commands are restricted to a hard-coded read-only allowlist.
+- Evidence stores the command output and SHA-256 hash of each output.
 
-`scan-host-key` only reads the key presented by the network endpoint. The displayed fingerprint must be verified through a separate trusted path before it is copied into `config.yml`.
+`scan-host-key` reads the key presented by the network endpoint. The displayed fingerprint must be verified through a separate trusted path before it is copied into `config.yml`.
 
 ## 1. Read the presented host key
 
 ```powershell
-& "C:\FGOps\venv\Scripts\fgops-agent.exe" `
+& C:\FGOps\venv\Scripts\fgops-agent.exe `
   scan-host-key `
-  --host 172.16.1.2 `
+  --host 192.0.2.1 `
   --port 22
 ```
 
@@ -25,7 +26,7 @@ Example:
 
 ```json
 {
-  "host": "172.16.1.2",
+  "host": "192.0.2.1",
   "port": 22,
   "key_type": "ssh-ed25519",
   "bits": 256,
@@ -33,44 +34,53 @@ Example:
 }
 ```
 
-Do not treat this network scan itself as proof of identity. Verify the fingerprint through a console session, an already trusted SSH client, a controlled asset record, or another independent administrative path.
+Do not treat this scan as proof of identity. Verify the fingerprint through a console session, an already trusted SSH client, a controlled asset record, or another independent administrative path.
 
 ## 2. Configure the pinned target
 
 ```yaml
 device:
-  host: 172.16.1.2
+  host: 192.0.2.1
   port: 22
-  username: fgops-readonly
+  username: fgops-admin
   host_key_sha256: SHA256:VERIFIED_VALUE
   password_env: FGOPS_SSH_PASSWORD
-  expected_hostname: SITEC-FW-02
-  expected_model: FortiGate-300D
+  # key_file: C:/ProgramData/FGOps/keys/fgops_ed25519
+  # key_passphrase_env: FGOPS_SSH_KEY_PASSPHRASE
+  connect_timeout_seconds: 20
+  command_timeout_seconds: 120
+  expected_hostname: REPLACE_WITH_EXPECTED_HOSTNAME
+  expected_model: REPLACE_WITH_EXPECTED_MODEL
   expected_firmware_branch: "6.4"
-  expected_build: 2098
+  expected_build: 0
   global_context: true
 ```
 
-For key authentication, configure `key_file` instead of placing a password in YAML.
+Use the least-privileged administrator profile that still supports the required global-context read, backup, and restore commands. For key authentication, configure `key_file` rather than embedding private-key content in YAML.
 
-## 3. Supply authentication for the current process
+## 3. Store authentication for scheduled execution
 
 ```powershell
-$env:FGOPS_SSH_PASSWORD = Read-Host "FortiGate SSH password" -AsSecureString |
-  ConvertFrom-SecureString -AsPlainText
+& C:\FGOps\venv\Scripts\fgops-agent.exe `
+  --config C:\ProgramData\FGOps\config.yml `
+  secret set FGOPS_SSH_PASSWORD
+
+& C:\FGOps\venv\Scripts\fgops-agent.exe `
+  --config C:\ProgramData\FGOps\config.yml `
+  secret status
 ```
 
-For unattended Windows Task Scheduler operation, use an appropriately protected service account and secret-delivery mechanism. Do not embed a password in the task command line, repository, or YAML file.
+For a one-time interactive diagnostic, the configured environment variable may be set in the current PowerShell process. Do not embed a password in the repository, YAML, Scheduled Task command line, or persistent plaintext machine environment.
 
-## 4. Run the preflight
+## 4. Run preflight
 
 ```powershell
-& "C:\FGOps\venv\Scripts\fgops-agent.exe" `
-  --config "C:\ProgramData\FGOps\config.yml" `
+& C:\FGOps\venv\Scripts\fgops-agent.exe `
+  --config C:\ProgramData\FGOps\config.yml `
   preflight
 ```
 
-The command runs only:
+The read-only command set is:
 
 ```text
 get system status
@@ -80,7 +90,7 @@ diagnose debug config-error-log read
 diagnose autoupdate signature check-all
 ```
 
-The expected hostname, model, FortiOS branch, and build are validated. A mismatch results in `FAILED_VALIDATION` and a non-zero exit code.
+The expected hostname, model, FortiOS branch, and build are validated. A mismatch produces a failed validation result and non-zero process outcome.
 
 ## Evidence
 
@@ -93,10 +103,16 @@ C:\ProgramData\FGOps\evidence
 Evidence includes:
 
 - captured UTC time;
-- target address and username;
+- target address and port;
 - pinned host-key fingerprint;
 - parsed system status;
 - parsed FortiGuard database versions;
 - raw output and SHA-256 for every command;
-- validation errors;
+- validation and command errors;
 - `device_changes_performed: false`.
+
+Reports can contain operationally sensitive target identity and version information. Keep them outside Git and protect them with the host access and retention policy.
+
+## Required interpretation
+
+A `PASS` means the pinned endpoint authenticated, the allowed commands completed, and configured identity expectations matched. It does not establish package compatibility, source trust, backup validity, or the safety of a future restore. Those gates are evaluated separately.

@@ -1,49 +1,141 @@
 # FGOps architecture
 
-FGOps separates internet-facing package discovery from private-network execution.
+FGOps separates internet-facing bundle discovery from private-network FortiGate management while keeping the complete production runtime on one controlled Windows VM.
 
-1. A controlled station obtains an offline signature bundle.
-2. The bundle enters quarantine and is inventoried by filename, size, SHA-256, and package type.
-3. An immutable manifest is generated. Approval is bound to the manifest ID and hashes.
-4. GitHub Issues provide the audit conversation and support `/fg` commands.
-5. A private Windows self-hosted runner can access the TFTP host and FortiGate management interface.
-6. The runner prepares a plan first. Applying packages remains disabled in v0.1.0.
-7. Future apply jobs compare `diagnose autoupdate versions` before and after every package.
+## Runtime components
 
-## Deferred approval model
+```text
+Configured HTTPS source
+        |
+        v
+Source monitor and downloader
+        |
+        v
+Incoming archive -> quarantine -> package inventory -> immutable manifest
+        |                                            |
+        |                                            v
+        |                                  local JSON state machine
+        v
+Policy cycle: prepare_only / approval / unattended
+        |
+        v
+DPAPI secret loader -> pinned SSH preflight -> temporary TFTP
+        |                                      |
+        |                                      +-> encrypted full-config backup
+        |                                      +-> selected package downloads
+        v
+Before/after FortiGuard version comparison -> postflight -> JSON/TXT evidence
+```
 
-FGOps does not keep a workflow job open while waiting for a person. Short event-driven jobs will persist and re-evaluate state.
+GitHub hosts source code, pull requests, and CI. GitHub is not in the runtime data path, and production device access does not require a self-hosted GitHub runner.
 
-Supported command grammar:
+## Source and preparation plane
 
-- `/fg approve`
-- `/fg reject <reason>`
-- `/fg snooze <duration>`
-- `/fg schedule <ISO-8601 timestamp>`
-- `/fg apply-safe`
-- `/fg status`
-- `/fg cancel`
+1. The agent downloads the configured source page using the selected TLS trust mode.
+2. The link matcher evaluates the anchor, URL, and surrounding list-item context.
+3. The selected archive is downloaded with timeout and maximum-size limits.
+4. Archive identity is the downloaded SHA-256, not the URL, filename, or web-page timestamp.
+5. Safe extraction rejects traversal, symlinks, duplicate package kinds, malformed entries, and unknown packages when configured to fail closed.
+6. Each package is recorded by kind, size, filename, SHA-256, restore family, expected FortiGuard objects, and deferred-apply eligibility.
+7. An immutable manifest ID binds the prepared archive and package inventory.
 
-An approval must bind to device identity, FortiOS build, bundle SHA-256, manifest SHA-256, and an exact package allow-list. Any change invalidates it.
+A publisher may reuse a stable URL while replacing the ZIP. SHA-256 identity ensures the new content is still detected.
 
-The initial deferred-safe set is AV, IPS, APDB, FFDB, MCDB, and MMDB. ISDB and Botnet remain explicit because the validated FG-300D run produced package-specific `No updates`, code `-85`, and partial-success/code `49` behavior.
+## Policy and state plane
 
-## FortiOS 6.4 result interpretation
+The local state file records each archive lifecycle:
+
+```text
+new content
+  -> PREPARED
+  -> APPLIED
+
+PREPARED
+  -> APPLY_FAILED
+  -> review-required state
+```
+
+`cycle` always obeys `execution.mode`:
+
+- `prepare_only`: prepare and stop;
+- `approval`: prepare and require the exact manifest ID;
+- `unattended`: prepare or resume an eligible `PREPARED` archive and enter controlled apply.
+
+Archives that failed apply or require review are not replayed automatically. State changes are written atomically. Manual state editing is an exceptional recovery action and must preserve the previous file as evidence.
+
+## Device execution plane
+
+The device-changing path is deliberately narrow:
+
+1. load the required secrets from the local encrypted store;
+2. validate the pinned SSH host key;
+3. confirm expected hostname, model, FortiOS branch/build, VDOM mode, and HA state;
+4. verify prepared package hashes;
+5. create a per-run TFTP root and stage only the selected package files;
+6. start TFTP on the configured management-facing address and UDP/69;
+7. export an encrypted full-configuration backup and verify its permanent SHA-256 copy;
+8. restore enabled packages in deterministic order;
+9. read `diagnose autoupdate versions` after each package;
+10. stop on blocking failure when configured;
+11. run postflight and write reports;
+12. stop TFTP and clean the temporary root after a successful cycle.
+
+Only the standard FortiOS confirmation prompt is answered automatically. Signature errors, wrong-firmware warnings, downgrade indications, identity changes, backup failures, and hash mismatches fail closed.
+
+## Package selection
+
+Package selection has two independent stages:
+
+1. the manifest records packages found in the ZIP;
+2. `execution.enabled_packages` decides which recorded packages may be restored.
+
+`apply.package_order` only sorts packages that already passed the allowlist. Presence in `planned_packages` does not imply installation.
+
+The validated unattended profile is:
+
+```text
+AV -> IPS -> APDB -> MCDB -> MMDB
+```
+
+FFDB is optional and target-specific. On the validated FortiGate 300D/FortiOS 6.4.16 deployment, the tested third-party FFDB package transferred successfully but was rejected with return code `49` and no Internet-service database version increase. The recommended default therefore excludes FFDB.
+
+## Result model
 
 | Evidence | Classification |
 |---|---|
 | Expected object version increases | `SUCCESS` |
-| Version increases and CLI returns a non-zero code | `SUCCESS_WITH_WARNING` |
-| TFTP succeeds, debug contains `No updates`, version remains equal | `SKIPPED_NO_UPDATE` |
-| TFTP succeeds but the expected object does not increase | `FAILED_UNCONFIRMED` |
-| Transfer or parsing fails | `FAILED` |
+| Version increases despite a non-zero FortiOS code or warning | `SUCCESS_WITH_WARNING` |
+| FortiGate explicitly reports successful transfer and versions are already current | `SKIPPED_NO_UPDATE` |
+| Expected object is missing or unchanged without a trusted successful-transfer outcome | `FAILED_UNCONFIRMED` |
+| Version decreases or a blocking validation/backup/identity error occurs | `FAILED` |
 
-A successful TFTP transfer proves delivery only; it does not prove that a FortiGuard object was applied.
+A successful TFTP transfer proves delivery only. It does not prove that FortiOS accepted, parsed, and activated the database.
+
+## FFDB return code 49
+
+FGOps v0.5.4 contains a bounded FFDB-specific guard:
+
+```text
+FFDB restore returns 49
+  -> do not submit a second FFDB package
+  -> poll Internet-service Database Apps/Maps versions every 30 seconds
+  -> wait up to 30 minutes by default
+  -> continue only if a version change is observed
+  -> otherwise retain a fail-closed result
+```
+
+The polling window can be overridden for controlled diagnostics through `FGOPS_FFDB_MAX_WAIT_SECONDS` and `FGOPS_FFDB_POLL_SECONDS`. A timeout does not convert code `49` into success.
 
 ## Trust boundaries
 
-- Third-party packages are untrusted until inventoried and approved.
-- Pull-request CI runs only on GitHub-hosted runners.
-- Network-capable workflows use dedicated labels and never run pull-request code.
-- Firmware, engine upgrades, downgrade, and signature bypass are outside deferred auto-approval.
-- TFTP is temporary and restricted to the management network; it is not an authenticity control.
+- The configured publisher and package files are outside the FGOps trust boundary.
+- TLS authenticates the configured web endpoint according to the selected trust store; it does not establish FortiGate package compatibility.
+- SHA-256 establishes local content identity; it does not establish publisher authenticity.
+- Windows DPAPI machine scope binds ciphertext to the machine; restrictive ACLs remain mandatory.
+- SSH host-key pinning authenticates the configured management endpoint.
+- TFTP is a temporary transport on the management network and is not an authenticity or confidentiality control.
+- JSON/TXT reports, backups, state, and quarantine data are operationally sensitive and remain outside Git.
+
+## Explicit non-goals
+
+FGOps does not automate FortiOS firmware upgrade or downgrade, engine replacement, signature-verification bypass, wrong-platform acceptance, security-level reduction, or arbitrary FortiGate CLI execution.

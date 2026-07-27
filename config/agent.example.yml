@@ -1,4 +1,6 @@
 # Copy this file outside the repository before adding production values.
+# The source below is an example third-party publisher, not an endorsement or
+# a guarantee that every contained package is compatible with every FortiGate.
 package_map: fortios64-package-map.yml
 
 source:
@@ -16,41 +18,61 @@ storage:
   evidence: evidence
   tftp: tftp
   state_file: state/agent-state.json
+  secret_store: secrets/secret-store.json
 
 execution:
-  # First live use must remain approval. Change to unattended only after reviewing
-  # at least one complete backup/apply/postflight evidence set.
+  # Keep the first live run in approval mode. Change to unattended only after
+  # reviewing a complete preflight, encrypted backup, apply, version comparison,
+  # postflight, and recovery evidence set.
   mode: approval
-  enabled_packages: [AV, IPS, APDB, FFDB, MCDB, MMDB]
+
+  # Authoritative restore allowlist. The validated default excludes FFDB because
+  # package compatibility is target-specific and code 49 without a version change
+  # is a failed activation, even when TFTP transfer completed.
+  enabled_packages: [AV, IPS, APDB, MCDB, MMDB]
   reject_unknown_packages: true
   prevent_downgrade: true
 
-# Obtain the fingerprint with `fgops-agent scan-host-key`, verify it through a
-# separate trusted path, then pin the verified value here.
+# Obtain the fingerprint with `fgops-agent scan-host-key`, verify it through an
+# independent trusted path, then pin the verified value here.
 device:
-  host: 172.16.1.2
+  host: 192.0.2.1
   port: 22
-  username: admin
+  username: fgops-admin
   host_key_sha256: SHA256:REPLACE_WITH_VERIFIED_FINGERPRINT
   password_env: FGOPS_SSH_PASSWORD
   # key_file: C:/ProgramData/FGOps/keys/fgops_ed25519
   # key_passphrase_env: FGOPS_SSH_KEY_PASSPHRASE
   connect_timeout_seconds: 20
   command_timeout_seconds: 120
-  expected_hostname: SITEC-FW-02
-  expected_model: FortiGate-300D
+  expected_hostname: REPLACE_WITH_EXPECTED_HOSTNAME
+  expected_model: REPLACE_WITH_EXPECTED_MODEL
   expected_firmware_branch: "6.4"
-  expected_build: 2098
+  expected_build: 0
   global_context: true
 
 apply:
   # Bind only to the dedicated management-facing VM address. FortiOS restore
-  # commands do not carry a custom TFTP port, so UDP/69 is mandatory.
-  tftp_bind_address: 192.168.1.179
-  tftp_advertise_address: 192.168.1.179
+  # commands do not carry a custom TFTP port, so UDP/69 is required.
+  tftp_bind_address: 192.0.2.10
+  tftp_advertise_address: 192.0.2.10
   tftp_port: 69
   require_backup: true
   backup_password_env: FGOPS_BACKUP_PASSWORD
   settle_seconds: 5
   stop_on_failure: true
-  package_order: [AV, IPS, APDB, FFDB, MCDB, MMDB]
+  package_order: [AV, IPS, APDB, MCDB, MMDB]
+
+# FFDB is opt-in only. After independent target validation, add FFDB to both
+# execution.enabled_packages and apply.package_order. FGOps polls FFDB versions
+# after FortiOS return code 49, but still fails closed without a version change.
+
+# Optional Telegram notifications. Store the token in the DPAPI secret store,
+# never in this YAML file.
+# notifications:
+#   telegram:
+#     enabled: true
+#     chat_id: "REPLACE_WITH_CHAT_ID"
+#     token_secret_name: FGOPS_TELEGRAM_BOT_TOKEN
+#     timeout_seconds: 30
+#     notify_on: [PREPARED, FAILED, SUCCESS, SUCCESS_WITH_WARNING]
