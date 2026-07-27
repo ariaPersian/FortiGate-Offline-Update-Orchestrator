@@ -1,149 +1,158 @@
 # FGOps
 
-**FortiGate Offline Update Orchestrator** automates preparation and controlled delivery of offline FortiGuard signature bundles.
+**FortiGate Offline Update Orchestrator** is a Windows-based agent for discovering, preparing, backing up, applying, and auditing offline FortiGuard signature updates on FortiGate appliances that cannot retrieve updates directly from FortiGuard.
 
-> Current milestone: `v0.5.0`. A standalone Windows VM can monitor the source page, prepare and deduplicate a FortiOS 6.4 bundle, notify through Telegram, load machine-scoped encrypted secrets for scheduled execution, validate encrypted full-config backup delivery, and apply a prepared manifest according to `prepare_only`, `approval`, or `unattended` policy.
+> Current milestone: `v0.5.4`. The validated deployment is a standalone Windows VM managing a FortiGate 300D running FortiOS 6.4.16 in multiple-VDOM mode. The architecture is configurable, but other models, FortiOS branches, package publishers, and database families must be validated independently before unattended use.
 
-## Primary deployment model
+## What FGOps does
 
 ```text
 Windows Scheduled Task (SYSTEM)
-  -> policy cycle
-  -> monitor configured source page
-  -> discover Fortigate V6.4 download link
-  -> bounded download + SHA-256 deduplication
-  -> safe extraction + package inventory
-  -> Telegram notification when configured
-  -> prepare_only: stop
-  -> approval: wait for exact local manifest approval
-  -> unattended: load DPAPI machine secrets
-  -> pinned read-only SSH preflight
-  -> temporary restricted TFTP service
-  -> encrypted full-config backup
-  -> AV / IPS / APDB / FFDB / MCDB / MMDB restore
-  -> per-package version comparison
-  -> postflight + JSON/TXT report
+  -> poll a configured download page
+  -> resolve the selected FortiGate bundle link
+  -> download with TLS, size, and timeout limits
+  -> identify the archive by SHA-256
+  -> safely extract and inventory package files
+  -> generate an immutable local manifest
+  -> obey prepare_only / approval / unattended policy
+  -> load encrypted local secrets when device access is required
+  -> verify the pinned SSH host key and expected FortiGate identity
+  -> start a temporary restricted TFTP endpoint
+  -> receive an encrypted full-configuration backup
+  -> apply only explicitly enabled package families
+  -> compare FortiGuard object versions before and after each restore
+  -> run postflight checks and write JSON/TXT evidence
+  -> stop TFTP and persist the archive result
 ```
 
-GitHub maintains and reviews the code. A GitHub self-hosted runner is not required.
+GitHub is the development and review system. It is not required in the production runtime path, and no self-hosted GitHub runner is required.
 
-## Supported profile
+## Validated operational profile
 
-- FortiGate 300D
-- FortiOS 6.4.16 build 2098
-- multiple VDOM mode and global-context execution
-- default apply allowlist: AV, IPS, APDB, FFDB, MCDB, MMDB
-- ISDB and Botnet are classified but excluded from controlled/unattended apply
-- firmware upgrade, downgrade enablement, signature bypass, and security-level reduction are out of scope
+| Area | Validated value |
+|---|---|
+| Runtime host | Windows VM, Python 3.13, Scheduled Task running as `SYSTEM` |
+| Appliance | FortiGate 300D |
+| FortiOS | 6.4.16 build 2098 |
+| VDOM mode | Multiple VDOM, global-context execution |
+| Validated package set | AV, IPS, APDB, MCDB, MMDB |
+| Optional package | FFDB, only after target-specific validation |
+| Out of scope | Firmware upgrade/downgrade, signature bypass, security-level reduction, Botnet automation |
+
+The tested FortiGate rejected the third-party FFDB file with FortiOS return code `49` while its Internet-service database versions remained unchanged. FFDB is therefore not part of the recommended default allowlist. FGOps can poll FFDB versions for up to 30 minutes after code `49`, but it still fails closed unless a version change is observed.
+
+## Core capabilities
+
+- configurable source-page monitoring and link matching;
+- native/system TLS validation, bounded downloads, and atomic file replacement;
+- SHA-256 archive deduplication even when a publisher reuses the same URL;
+- safe ZIP extraction and package-kind inventory;
+- local manifest and state persistence outside the repository;
+- SSH host-key pinning and expected device identity checks;
+- encrypted full-config backup before every controlled apply;
+- temporary TFTP server bound to a specified management address;
+- package allowlist, deterministic order, stop-on-failure, and downgrade protection;
+- before/after version verification instead of trusting transfer success alone;
+- Windows DPAPI machine-scoped secret storage with restrictive NTFS ACLs;
+- `prepare_only`, exact-manifest `approval`, and `unattended` policies;
+- JSON/TXT preflight, backup, apply, and command-output evidence;
+- optional Telegram notifications.
 
 ## Install on a Windows VM
 
 ```powershell
+Set-Location C:\FGOps
+
 py -3.13 -m venv C:\FGOps\venv
 & C:\FGOps\venv\Scripts\python.exe -m pip install --upgrade pip
 & C:\FGOps\venv\Scripts\python.exe -m pip install --no-user C:\FGOps
 
 & C:\FGOps\venv\Scripts\fgops-agent.exe `
   --config C:\ProgramData\FGOps\config.yml `
-  init --package-map-source C:\FGOps\config\fortios64-package-map.yml
+  init `
+  --package-map-source C:\FGOps\config\fortios64-package-map.yml
 ```
 
-## Safe preparation and preflight
+Copy and adapt [`config/agent.example.yml`](config/agent.example.yml). Keep production addresses, fingerprints, credentials, evidence, backups, and package files outside Git.
+
+## Minimum configuration model
+
+```yaml
+execution:
+  # Use approval for the first reviewed live run. Change to unattended only after
+  # backup, restore, version comparison, and postflight evidence are accepted.
+  mode: approval
+  enabled_packages: [AV, IPS, APDB, MCDB, MMDB]
+  reject_unknown_packages: true
+  prevent_downgrade: true
+
+apply:
+  tftp_bind_address: 192.0.2.10
+  tftp_advertise_address: 192.0.2.10
+  tftp_port: 69
+  require_backup: true
+  backup_password_env: FGOPS_BACKUP_PASSWORD
+  settle_seconds: 5
+  stop_on_failure: true
+  package_order: [AV, IPS, APDB, MCDB, MMDB]
+```
+
+Package presence in the downloaded ZIP does not make it eligible for installation. `execution.enabled_packages` is the authoritative apply allowlist; `apply.package_order` only orders packages that already passed that filter.
+
+## Prepare and validate the path
 
 ```powershell
-fgops-agent --config C:\ProgramData\FGOps\config.yml validate-config
-fgops-agent --config C:\ProgramData\FGOps\config.yml run --dry-run
-fgops-agent scan-host-key --host 172.16.1.2 --port 22
-fgops-agent --config C:\ProgramData\FGOps\config.yml preflight
-fgops-agent --config C:\ProgramData\FGOps\config.yml status
+& C:\FGOps\venv\Scripts\fgops-agent.exe `
+  --config C:\ProgramData\FGOps\config.yml `
+  validate-config
+
+& C:\FGOps\venv\Scripts\fgops-agent.exe `
+  --config C:\ProgramData\FGOps\config.yml `
+  run --dry-run
+
+& C:\FGOps\venv\Scripts\fgops-agent.exe `
+  scan-host-key --host 192.0.2.1 --port 22
+
+& C:\FGOps\venv\Scripts\fgops-agent.exe `
+  --config C:\ProgramData\FGOps\config.yml `
+  preflight
+
+& C:\FGOps\venv\Scripts\fgops-agent.exe `
+  --config C:\ProgramData\FGOps\config.yml `
+  backup-test
 ```
 
-The URL is rediscovered on each run. A reused URL does not hide a new package because archive identity is the downloaded SHA-256.
+`backup-test` starts the same temporary TFTP path used by controlled apply, exports one encrypted full configuration, verifies its permanent SHA-256 copy, writes evidence, and performs no package restore.
 
 ## Windows machine secret store
 
-Scheduled execution cannot depend on process-scoped PowerShell environment variables. FGOps stores only DPAPI-encrypted ciphertext in:
+Scheduled execution cannot depend on a PowerShell process environment. FGOps stores DPAPI-encrypted ciphertext in:
 
 ```text
 C:\ProgramData\FGOps\secrets\secret-store.json
 ```
 
-The store uses Windows DPAPI `LocalMachine` scope and removes inherited ACLs, granting full control only to `SYSTEM` and the local Administrators group. The plaintext is injected into the scheduled process environment only for the duration of the controlled operation and is then restored/removed.
+The store uses DPAPI `LocalMachine` scope and removes inherited ACLs, granting access only to `SYSTEM` and local Administrators. Machine scope is not an authorization boundary by itself; the NTFS ACL is mandatory.
 
-Create the required secrets interactively from an elevated shell:
+Create the required secrets from an elevated shell:
 
 ```powershell
 fgops-agent --config C:\ProgramData\FGOps\config.yml secret set FGOPS_SSH_PASSWORD
 fgops-agent --config C:\ProgramData\FGOps\config.yml secret set FGOPS_BACKUP_PASSWORD
-fgops-agent --config C:\ProgramData\FGOps\config.yml secret set FGOPS_TELEGRAM_BOT_TOKEN
 fgops-agent --config C:\ProgramData\FGOps\config.yml secret status
 ```
 
-Secret values are never printed by the CLI and must never be committed to Git.
-
-## Telegram notification policy
-
-Add an optional notification block to `config.yml`:
-
-```yaml
-storage:
-  root: C:/ProgramData/FGOps
-  secret_store: secrets/secret-store.json
-
-notifications:
-  telegram:
-    enabled: true
-    chat_id: "REPLACE_WITH_CHAT_ID"
-    token_secret_name: FGOPS_TELEGRAM_BOT_TOKEN
-    timeout_seconds: 30
-    notify_on: [PREPARED, FAILED, SUCCESS, SUCCESS_WITH_WARNING]
-```
-
-Validate and send a test message:
-
-```powershell
-fgops-agent --config C:\ProgramData\FGOps\config.yml validate-config
-fgops-agent --config C:\ProgramData\FGOps\config.yml notify-test
-```
-
-The Bot API token remains in the encrypted local secret store, not YAML.
-
-## Backup-only validation
-
-Before the first live package restore, validate the exact SSH, global-context, TFTP, encryption, firewall, and persistence path independently:
-
-```powershell
-fgops-agent `
-  --config C:\ProgramData\FGOps\config.yml `
-  backup-test
-```
-
-The command runs preflight, starts the temporary UDP/69 service, exports one encrypted `full-config` backup, verifies the permanent copy with SHA-256, writes JSON/TXT evidence, and removes the temporary TFTP run directory. It never issues `execute restore` and records:
-
-```text
-device_changes_performed: false
-package_restores_performed: 0
-```
+Optional notification tokens use the same store. Secret values are never printed by the CLI and must never be committed.
 
 ## Execution policies
 
 ### `prepare_only`
 
-The cycle downloads, validates, inventories, and optionally notifies. It never connects to the FortiGate for apply.
-
-```yaml
-execution:
-  mode: prepare_only
-```
+Downloads, deduplicates, extracts, inventories, and records the bundle. No device-changing path is entered.
 
 ### `approval`
 
-The cycle prepares and notifies, then waits. Apply requires the exact manifest ID and loads SSH/backup secrets from the machine store:
-
-```yaml
-execution:
-  mode: approval
-```
+Prepares the bundle and waits for the exact local manifest ID:
 
 ```powershell
 fgops-agent `
@@ -153,24 +162,19 @@ fgops-agent `
 
 ### `unattended`
 
-A newly prepared manifest immediately passes through the same pinned preflight, mandatory encrypted backup, hash verification, temporary TFTP, downgrade protection, package allowlist, and postflight gates:
-
-```yaml
-execution:
-  mode: unattended
-```
-
-Enable this only after at least one approval-mode live evidence set has been reviewed.
+A new or previously prepared eligible manifest runs through the same preflight, mandatory backup, hash verification, allowlist, version checks, postflight, and audit gates without interactive operator approval. Failed or review-required archives are not replayed automatically.
 
 ## Result classification
 
-```text
-expected object version increased                         SUCCESS
-version increased despite FortiOS non-zero return code    SUCCESS_WITH_WARNING
-No updates with return code -85                           SKIPPED_NO_UPDATE
-expected object absent or unchanged                       FAILED_UNCONFIRMED
-object version decreased                                  FAILED
-```
+| Evidence | Result |
+|---|---|
+| Expected object version increased | `SUCCESS` |
+| Version increased despite a FortiOS warning/non-zero code | `SUCCESS_WITH_WARNING` |
+| FortiGate explicitly completed transfer and versions were already current | `SKIPPED_NO_UPDATE` |
+| Expected object missing or unchanged without a trusted successful-transfer outcome | `FAILED_UNCONFIRMED` |
+| Version decreased, package validation failed, backup failed, or target identity changed | `FAILED` |
+
+A successful TFTP transfer proves delivery only. FGOps requires the corresponding FortiGuard object state to support the final classification.
 
 ## Schedule the policy cycle
 
@@ -179,10 +183,24 @@ object version decreased                                  FAILED
   -AgentExecutable C:\FGOps\venv\Scripts\fgops-agent.exe `
   -ConfigPath C:\ProgramData\FGOps\config.yml `
   -IntervalHours 6 `
-  -TaskCommand cycle
+  -TaskCommand cycle `
+  -TaskName "FGOps Offline Update Monitor"
 ```
 
-The task runs as `SYSTEM`. `cycle` always obeys `execution.mode`; registration alone does not enable unattended apply.
+The task runs as `SYSTEM`, prevents overlapping runs, and obeys `execution.mode`. Schedule live unattended application for a maintenance window appropriate to the managed environment.
+
+## Runtime data
+
+```text
+C:\ProgramData\FGOps\incoming\                 downloaded archives
+C:\ProgramData\FGOps\quarantine\              extracted packages and manifests
+C:\ProgramData\FGOps\state\agent-state.json   archive lifecycle state
+C:\ProgramData\FGOps\secrets\                 encrypted local secrets
+C:\ProgramData\FGOps\evidence\                preflight and backup evidence
+C:\ProgramData\FGOps\evidence\backups\        encrypted full-config backups
+C:\ProgramData\FGOps\reports\                 apply reports
+C:\ProgramData\FGOps\tftp\                    per-run temporary TFTP roots
+```
 
 ## Commands
 
@@ -201,27 +219,16 @@ fgops-agent apply --manifest-id ... [--approve-manifest ...]
 fgops-agent status
 ```
 
-## Safety controls
+## Documentation
 
-- bounded download size and timeout;
-- native/system TLS validation;
-- archive and package SHA-256 identity;
-- ZIP traversal, symlink, duplicate-kind, and unknown-package rejection;
-- SSH host-key pinning and expected target identity;
-- temporary TFTP root with exact backup upload basename;
-- encrypted backup required by default;
-- Windows DPAPI LocalMachine secret protection plus restrictive NTFS ACLs;
-- secrets injected only for the controlled operation;
-- Telegram token never stored in YAML;
-- explicit execution policy boundary;
-- backup-only test before first package restore;
-- fixed package order and stop-on-failure;
-- downgrade detection;
-- preflight/postflight and command-output hashes;
-- atomic local state updates.
-
-See [standalone agent](docs/standalone-agent.md), [read-only preflight](docs/read-only-preflight.md), [backup test](docs/backup-test.md), [controlled apply](docs/controlled-apply.md), [architecture](docs/architecture.md), and [security policy](SECURITY.md).
+- [Architecture and trust boundaries](docs/architecture.md)
+- [Standalone Windows deployment](docs/standalone-agent.md)
+- [Read-only FortiGate preflight](docs/read-only-preflight.md)
+- [Backup-only validation](docs/backup-test.md)
+- [Controlled apply runbook](docs/controlled-apply.md)
+- [Production operations](docs/operations.md)
+- [Security policy](SECURITY.md)
 
 ## Disclaimer
 
-FGOps is independent and is not affiliated with or endorsed by Fortinet or third-party package publishers. Use only packages you are authorized to obtain and validate them under your organization’s security policy.
+FGOps is independent and is not affiliated with or endorsed by Fortinet or any package publisher. A discovered or successfully downloaded package is not automatically trusted or compatible. Use only packages you are authorized to obtain and validate each package family against the exact target model and FortiOS branch before unattended deployment.
