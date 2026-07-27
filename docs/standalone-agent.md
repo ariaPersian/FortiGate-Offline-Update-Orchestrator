@@ -1,12 +1,13 @@
 # Standalone Windows agent
 
-FGOps v0.5.4 uses a local Windows agent as the primary deployment model for a single FortiGate management target. GitHub remains the source-code and CI system; it is not required during scheduled production execution.
+FGOps v0.5.5 uses a local Windows agent as the primary deployment model for a single FortiGate management target. The authoritative source is the private repository `ariaPersian/FortiGate-Offline-Update-Orchestrator-Private`. GitHub is not required during scheduled production execution.
 
 ## Runtime flow
 
 ```text
 Scheduled Task running as SYSTEM
   -> fgops-agent cycle
+  -> open or append today's runtime log
   -> poll configured source page
   -> discover the matching bundle link
   -> bounded atomic ZIP download
@@ -19,16 +20,20 @@ Scheduled Task running as SYSTEM
   -> temporary restricted TFTP
   -> encrypted full-config backup
   -> selected package restores and version checks
-  -> postflight, report, state update, cleanup
+  -> postflight, report, state update, daily log, cleanup
 ```
 
 The source parser can match the anchor text, URL, and surrounding list-item context. This supports pages where the product/version label is outside a generic download anchor.
 
-## Install or upgrade
+## New checkout
 
 From an elevated PowerShell session:
 
 ```powershell
+git clone `
+  https://github.com/ariaPersian/FortiGate-Offline-Update-Orchestrator-Private.git `
+  C:\FGOps
+
 Set-Location C:\FGOps
 
 py -3.13 -m venv C:\FGOps\venv
@@ -36,21 +41,51 @@ py -3.13 -m venv C:\FGOps\venv
 & C:\FGOps\venv\Scripts\python.exe -m pip install --no-user C:\FGOps
 ```
 
-To upgrade an existing checkout:
-
-```powershell
-Set-Location C:\FGOps
-git pull --ff-only
-
-& C:\FGOps\venv\Scripts\python.exe `
-  -m pip install --upgrade --no-user C:\FGOps
-```
-
 Confirm the installed version:
 
 ```powershell
 & C:\FGOps\venv\Scripts\python.exe -m pip show fgops
 ```
+
+The expected release for this document is `0.5.5`.
+
+## Existing checkout and private remote
+
+Before every upgrade, verify the remote:
+
+```powershell
+Set-Location C:\FGOps
+git remote -v
+git status
+```
+
+The fetch and push URL must be:
+
+```text
+https://github.com/ariaPersian/FortiGate-Offline-Update-Orchestrator-Private.git
+```
+
+If the checkout still points to the former public repository, or `git fetch` reports a forced update and `git pull --ff-only` reports diverging branches, do not merge or rebase the histories into the production checkout. Follow [Private repository synchronization](private-repository-sync.md): preserve a safety branch and stash, change the remote, fetch the private branch, and align local `main` with `origin/main`.
+
+## Upgrade
+
+Disable scheduling while source and the virtual environment are changed:
+
+```powershell
+Disable-ScheduledTask -TaskName "FGOps Offline Update Monitor"
+
+Set-Location C:\FGOps
+git fetch --prune origin
+git switch main
+git reset --hard origin/main
+
+& C:\FGOps\venv\Scripts\python.exe `
+  -m pip install --upgrade --no-user C:\FGOps
+
+& C:\FGOps\venv\Scripts\python.exe -m pip show fgops
+```
+
+Run a foreground `status`, `NO_CHANGE` cycle, `preflight`, or `backup-test` as appropriate. Inspect the daily log before re-enabling the Scheduled Task.
 
 ## Initialize runtime storage
 
@@ -77,16 +112,17 @@ C:\ProgramData\FGOps\secrets\secret-store.json
 C:\ProgramData\FGOps\evidence\
 C:\ProgramData\FGOps\evidence\backups\
 C:\ProgramData\FGOps\reports\
+C:\ProgramData\FGOps\logs\
 C:\ProgramData\FGOps\tftp\
 ```
 
-Archive identity is SHA-256. The agent therefore detects new bytes even if a source reuses the same URL and filename. State records the archive path, manifest ID, work directory, planned package kinds, lifecycle status, apply report, backup path, last result, and last error.
+Archive identity is SHA-256. The agent detects new bytes even if a source reuses the same URL and filename. State records the archive path, manifest ID, work directory, planned package kinds, lifecycle status, apply report, backup path, last result, and last error.
 
 State writes are atomic. Do not delete or edit the state file to force reinstallation. A manual recovery reset should be rare, evidence-backed, scoped to one archive hash, and preceded by a backup of the state file.
 
 ## Configure secrets
 
-Scheduled execution under `SYSTEM` cannot inherit secrets entered in an interactive PowerShell session. Store the required values in the local DPAPI machine store:
+Scheduled execution under `SYSTEM` cannot inherit secrets entered in an interactive PowerShell session. Store required values in the local DPAPI machine store:
 
 ```powershell
 & C:\FGOps\venv\Scripts\fgops-agent.exe `
@@ -169,6 +205,7 @@ The task:
 - prevents overlapping instances;
 - starts missed runs when the VM becomes available;
 - executes `cycle`, which obeys the configured policy;
+- writes to the same daily runtime log as foreground commands;
 - does not make `prepare_only` or `approval` unattended merely by being registered.
 
 Inspect it with:
@@ -180,17 +217,41 @@ $Task.Triggers[0].Repetition | Format-List Interval,Duration,StopAtDurationEnd
 Get-ScheduledTaskInfo -TaskName "FGOps Offline Update Monitor"
 ```
 
-Disable the task during troubleshooting or before any manual recovery operation:
+Disable the task during troubleshooting, upgrades, or manual recovery:
 
 ```powershell
 Disable-ScheduledTask -TaskName "FGOps Offline Update Monitor"
 ```
 
-Re-enable it only after the foreground cycle finishes with `SUCCESS`, `SUCCESS_WITH_WARNING`, or a clean `NO_CHANGE` state:
+Re-enable it only after the foreground operation finishes with `SUCCESS`, `SUCCESS_WITH_WARNING`, or a clean `NO_CHANGE` state:
 
 ```powershell
 Enable-ScheduledTask -TaskName "FGOps Offline Update Monitor"
 ```
+
+## Daily runtime logging
+
+Every agent command writes to:
+
+```text
+C:\ProgramData\FGOps\logs\fgops-YYYY-MM-DD.log
+```
+
+Display today's log:
+
+```powershell
+$Today = Get-Date -Format "yyyy-MM-dd"
+Get-Content "C:\ProgramData\FGOps\logs\fgops-$Today.log" -Wait
+```
+
+The default retention is 30 daily files. Optional machine settings are:
+
+```powershell
+[Environment]::SetEnvironmentVariable("FGOPS_LOG_RETENTION_DAYS", "30", "Machine")
+[Environment]::SetEnvironmentVariable("FGOPS_LOG_LEVEL", "INFO", "Machine")
+```
+
+See [Daily runtime logging](daily-runtime-logging.md) for event format, search, retention, and security guidance.
 
 ## Operational package profile
 
@@ -201,13 +262,15 @@ execution:
   enabled_packages: [AV, IPS, APDB, MCDB, MMDB]
 ```
 
-FFDB is intentionally opt-in. Add it only after the exact FFDB package source, FortiGate model, and FortiOS branch have been validated. A TFTP `OK` line followed by `Failed to restore other objects file` and return code `49` is a failed activation, even if the file transfer completed.
+The validated live sequence completed as `SUCCESS_WITH_WARNING`: AV, IPS, APDB, and MCDB were already current; MMDB increased from `93.07607` to `93.07613`.
+
+FFDB is intentionally excluded. Add it only after the exact FFDB package source, FortiGate model, and FortiOS branch have been validated. A TFTP `OK` line followed by `Failed to restore other objects file` and return code `49` is a failed activation, even if file transfer completed.
 
 ## Maintenance and retention
 
 - Schedule unattended apply during an approved maintenance window.
 - Monitor available disk space under `C:\ProgramData\FGOps`.
-- Retain encrypted backups and apply reports according to policy.
+- Retain encrypted backups, apply reports, evidence, and daily logs according to policy.
 - Periodically test that backups are readable through an approved restore-validation process; do not test a restore on the production appliance merely to validate automation.
 - Review changes to the source-page structure and package filenames after publisher changes.
 - Rotate secrets and re-verify the pinned host key after authorized device replacement or key rotation.
