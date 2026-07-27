@@ -143,6 +143,7 @@ def _run_restore_with_ffdb_poll(self, *, family: str, filename: str, tftp_addres
         before=before,
         max_wait_seconds=max_wait,
         poll_seconds=poll_seconds,
+        sleep_fn=time.sleep,
     )
     state = "changed" if changed else "unchanged"
     return (
