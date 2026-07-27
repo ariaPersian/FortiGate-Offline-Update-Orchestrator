@@ -1,6 +1,6 @@
 # Encrypted full-config backup test
 
-`fgops-agent backup-test` validates the exact SSH, global-context, TFTP, backup encryption, persistence, and evidence path used by controlled apply without restoring any FortiGuard package.
+`fgops-agent backup-test` validates the exact SSH, global-context, TFTP, backup encryption, persistence, evidence, and daily logging path used by controlled apply without restoring any FortiGuard package.
 
 ## What it does
 
@@ -12,7 +12,8 @@
 6. Copies it to the permanent evidence backup directory.
 7. Verifies the permanent copy with SHA-256.
 8. Writes JSON and text reports with the backup password redacted.
-9. Stops TFTP and removes the temporary run directory.
+9. Appends the result and exit code to the current daily runtime log.
+10. Stops TFTP and removes the temporary run directory.
 
 No `execute restore` command is issued. The report records:
 
@@ -57,7 +58,7 @@ fgops-agent --config C:\ProgramData\FGOps\config.yml secret set FGOPS_BACKUP_PAS
 fgops-agent --config C:\ProgramData\FGOps\config.yml secret status
 ```
 
-For a one-time interactive diagnostic, process environment variables may be used instead, but they must not be placed in YAML, Git, command history, Scheduled Task arguments, or reports.
+For a one-time interactive diagnostic, process environment variables may be used instead, but they must not be placed in YAML, Git, command history, Scheduled Task arguments, reports, or logs.
 
 ## Run
 
@@ -82,6 +83,7 @@ Permanent artifacts are written under:
 ```text
 C:\ProgramData\FGOps\evidence\backups
 C:\ProgramData\FGOps\reports
+C:\ProgramData\FGOps\logs
 ```
 
 Verify the backup SHA-256 independently:
@@ -96,6 +98,21 @@ Get-FileHash $Backup.FullName -Algorithm SHA256
 
 A failed preflight, missing secret, TFTP startup failure, FortiGate backup-command failure, empty upload, unstable upload, or SHA-256 copy mismatch aborts the test.
 
+## Correlate the daily log
+
+```powershell
+$Today = Get-Date -Format "yyyy-MM-dd"
+$LogPath = "C:\ProgramData\FGOps\logs\fgops-$Today.log"
+
+Select-String `
+  -Path $LogPath `
+  -Pattern '"event": "backup_test.completed"|"event": "command.failed"'
+```
+
+The daily result includes the report path, permanent backup path, backup SHA-256, file size, preflight evidence path, and process exit code. The backup password remains redacted.
+
 ## Interpretation
 
-A `PASS` proves that FGOps can authenticate the pinned target, create a full encrypted backup, receive it over the restricted TFTP path, preserve it, and verify the copy. It does not prove that the backup password is recoverable from an independent process, that the file has been restore-tested, or that any package is safe to apply. Those are separate organizational controls.
+A `PASS` proves that FGOps can authenticate the pinned target, create a full encrypted backup, receive it over the restricted TFTP path, preserve it, verify the copy, and record the result in evidence and the daily journal.
+
+It does not prove that the backup password is recoverable from an independent process, that the file has been restore-tested, or that any package is safe to apply. Those are separate organizational controls.
