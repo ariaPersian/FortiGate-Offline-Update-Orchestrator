@@ -1,0 +1,1 @@
+The failed AV attempt for manifest FGOPS-FBF5F94DCA1A32B1 stopped at a hash-only TFTP progress line and did not report a successful database transfer. FortiGate versions remained unchanged. Retry is permitted only after installing v0.5.2 and explicitly resetting that one archive from APPLY_FAILED to PREPARED.
