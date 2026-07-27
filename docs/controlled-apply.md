@@ -1,28 +1,10 @@
 # Controlled apply runbook
 
-FGOps v0.5.4 provides the device-changing path for selected offline FortiGuard database packages. The path is designed around exact package identity, pinned target identity, mandatory encrypted backup, temporary TFTP delivery, and observed FortiGuard object versions.
+FGOps v0.5.5 provides the device-changing path for selected offline FortiGuard database packages. The path is designed around exact package identity, pinned target identity, mandatory encrypted backup, temporary TFTP delivery, observed FortiGuard object versions, persistent reports, and daily runtime logging.
 
-## Fortinet command basis
+## Validated package profile
 
-The controlled path uses the FortiOS CLI families documented for manual database update and configuration backup:
-
-```text
-execute restore av tftp <package> <server>
-execute restore ips tftp <package> <server>
-execute restore other-objects tftp <package> <server>
-execute backup full-config tftp <filename> <server> <password>
-diagnose autoupdate versions
-```
-
-References:
-
-- [FortiOS 6.4 manual updates](https://docs.fortinet.com/document/fortigate/6.4.0/administration-guide/200702/manual-updates)
-- [FortiOS 6.4 multi-VDOM backup and restore](https://docs.fortinet.com/document/fortigate/6.4.0/administration-guide/87472/backing-up-and-restoring-configurations-in-multi-vdom-mode)
-- [FortiOS 6.4 configuration backup best practice](https://docs.fortinet.com/document/fortigate/6.4.0/best-practices/262994/performing-a-configuration-backup)
-
-## Recommended configuration
-
-Start with `approval` mode and the validated package set:
+Use the validated default allowlist:
 
 ```yaml
 execution:
@@ -42,9 +24,31 @@ apply:
   package_order: [AV, IPS, APDB, MCDB, MMDB]
 ```
 
-`tftp_bind_address` is the dedicated management-facing address on the FGOps VM. `tftp_advertise_address` is placed in the FortiOS command and must be reachable from the FortiGate. FortiOS restore commands do not expose a custom TFTP port, so the endpoint uses UDP/69.
+The validated live cycle completed as `SUCCESS_WITH_WARNING`: AV, IPS, APDB, and MCDB were already current, while MMDB increased from `93.07607` to `93.07613`.
 
-The ZIP inventory may contain additional package families. Only `execution.enabled_packages` authorizes installation. `package_order` does not authorize a package by itself.
+FFDB is excluded from the recommended profile. On the validated FortiGate 300D/FortiOS 6.4.16 target, the tested FFDB package transferred but failed activation with return code `49`; the two expected Internet-service database versions remained unchanged.
+
+The ZIP inventory can still contain FFDB or another disabled family. Only `execution.enabled_packages` authorizes installation. `apply.package_order` sorts already-authorized packages and does not authorize a package by itself.
+
+## Fortinet command basis
+
+The controlled path uses the FortiOS CLI command families for manual database update and configuration backup:
+
+```text
+execute restore av tftp <package> <server>
+execute restore ips tftp <package> <server>
+execute restore other-objects tftp <package> <server>
+execute backup full-config tftp <filename> <server> <password>
+diagnose autoupdate versions
+```
+
+References:
+
+- [FortiOS 6.4 manual updates](https://docs.fortinet.com/document/fortigate/6.4.0/administration-guide/200702/manual-updates)
+- [FortiOS 6.4 multi-VDOM backup and restore](https://docs.fortinet.com/document/fortigate/6.4.0/administration-guide/87472/backing-up-and-restoring-configurations-in-multi-vdom-mode)
+- [FortiOS 6.4 configuration backup best practice](https://docs.fortinet.com/document/fortigate/6.4.0/best-practices/262994/performing-a-configuration-backup)
+
+`tftp_bind_address` is the dedicated management-facing address on the FGOps VM. `tftp_advertise_address` is placed in the FortiOS command and must be reachable from the FortiGate. FortiOS restore commands do not expose a custom TFTP port, so the endpoint uses UDP/69.
 
 ## Secrets
 
@@ -56,11 +60,11 @@ fgops-agent --config C:\ProgramData\FGOps\config.yml secret set FGOPS_BACKUP_PAS
 fgops-agent --config C:\ProgramData\FGOps\config.yml secret status
 ```
 
-Do not place either secret in YAML, Git, command history, Scheduled Task arguments, or reports.
+Do not place either secret in YAML, Git, command history, Scheduled Task arguments, reports, or logs.
 
 ## Prerequisites
 
-1. Install the reviewed FGOps revision in the production virtual environment.
+1. Install the reviewed FGOps revision from the authoritative private repository.
 2. Copy production configuration outside the repository.
 3. Verify the FortiGate host-key fingerprint through an independent trusted path.
 4. Configure expected hostname, model, FortiOS branch/build, and global-context behavior.
@@ -69,6 +73,7 @@ Do not place either secret in YAML, Git, command history, Scheduled Task argumen
 7. Store the SSH and backup encryption secrets.
 8. Run `preflight` and `backup-test` successfully.
 9. Review the package allowlist and maintenance window.
+10. Confirm daily runtime logging is writable.
 
 Confirm that UDP/69 is not already in use:
 
@@ -142,6 +147,7 @@ PREPARED
   -> stop on blocking failure when configured
   -> postflight PASS
   -> JSON/TXT report
+  -> daily runtime result and exit-code event
   -> APPLIED or APPLY_FAILED state
   -> TFTP cleanup after successful completion
 ```
@@ -171,7 +177,7 @@ downgrade
 
 ## Result classification
 
-Classification uses expected FortiGuard objects before and after restore, together with the CLI output:
+Classification uses expected FortiGuard objects before and after restore together with CLI output:
 
 | Condition | Result |
 |---|---|
@@ -181,13 +187,15 @@ Classification uses expected FortiGuard objects before and after restore, togeth
 | Expected object missing or unchanged without a trusted successful-transfer outcome | `FAILED_UNCONFIRMED` |
 | Version decreased or blocking validation/backup/identity error | `FAILED` |
 
-`SUCCESS_WITH_WARNING` and `SKIPPED_NO_UPDATE` produce an overall warning result but do not stop the package sequence. `FAILED` and `FAILED_UNCONFIRMED` stop the remaining sequence when `stop_on_failure: true`.
+`SUCCESS_WITH_WARNING` and `SKIPPED_NO_UPDATE` do not stop the package sequence. `FAILED` and `FAILED_UNCONFIRMED` stop the remaining sequence when `stop_on_failure: true`.
+
+An overall `SUCCESS_WITH_WARNING` is expected when at least one enabled package is already current. It is not equivalent to a failed cycle.
 
 ## FFDB and return code 49
 
 FFDB is target-specific and is not in the recommended default allowlist.
 
-If FFDB is explicitly enabled and FortiOS returns code `49`, FGOps v0.5.4:
+If FFDB is explicitly enabled and FortiOS returns code `49`, FGOps:
 
 1. does not submit the package a second time;
 2. polls `Internet-service Database Apps` and `Internet-service Full Database Maps` every 30 seconds;
@@ -202,9 +210,9 @@ FGOPS_FFDB_MAX_WAIT_SECONDS
 FGOPS_FFDB_POLL_SECONDS
 ```
 
-A transfer message such as `Get other objects from tftp server OK.` proves that the file reached FortiOS. If it is followed by `Failed to restore other objects file`, return code `49`, and unchanged database versions, the package was not activated and must not be treated as current.
+A transfer message such as `Get other objects from tftp server OK.` proves that the file reached FortiOS. If it is followed by `Failed to restore other objects file`, return code `49`, and unchanged database versions, the package was not activated.
 
-## Evidence
+## Evidence and daily logs
 
 FGOps writes:
 
@@ -214,14 +222,17 @@ C:\ProgramData\FGOps\evidence\<timestamp>-<host>.txt
 C:\ProgramData\FGOps\evidence\backups\<hostname>-<timestamp>-full.conf
 C:\ProgramData\FGOps\reports\<timestamp>-<manifest>-apply.json
 C:\ProgramData\FGOps\reports\<timestamp>-<manifest>-apply.txt
+C:\ProgramData\FGOps\logs\fgops-YYYY-MM-DD.log
 ```
 
 Reports contain target identity, preflight/postflight evidence paths, backup metadata, per-package before/after versions, return codes, classifications, and hashes of command output. Backup passwords are redacted.
 
+The daily log adds command start, structured result, process exit code, and exception traceback. It supplements reports and evidence; it does not replace them.
+
 ## Failure recovery
 
 1. Disable the Scheduled Task before investigation.
-2. Preserve the failed apply report, preflight/postflight evidence, encrypted backup, state file, and TFTP run root.
+2. Preserve the failed apply report, daily log, preflight/postflight evidence, encrypted backup, state file, and relevant quarantine/TFTP data.
 3. Compare package command output with `diagnose autoupdate versions` on the FortiGate.
 4. Do not infer activation from TFTP success alone.
 5. Correct code, configuration, package allowlist, or source compatibility before retrying.

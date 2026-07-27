@@ -1,26 +1,30 @@
 # FGOps — FortiGate Offline Update Orchestrator
 
-[![CI](https://github.com/ariaPersian/FortiGate-Offline-Update-Orchestrator/actions/workflows/ci.yml/badge.svg)](https://github.com/ariaPersian/FortiGate-Offline-Update-Orchestrator/actions/workflows/ci.yml)
+[![CI](https://github.com/ariaPersian/FortiGate-Offline-Update-Orchestrator-Private/actions/workflows/ci.yml/badge.svg)](https://github.com/ariaPersian/FortiGate-Offline-Update-Orchestrator-Private/actions/workflows/ci.yml)
 [![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-3776AB)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-**FGOps** is a policy-driven Windows agent for discovering, preparing, backing up, applying, and auditing offline FortiGuard signature updates on FortiGate appliances that cannot retrieve updates directly from FortiGuard.
+**FGOps** is a policy-driven Windows agent for discovering, preparing, backing up, applying, logging, and auditing offline FortiGuard signature updates on FortiGate appliances that cannot retrieve updates directly from FortiGuard.
 
-> **Current release:** `v0.5.4`  
+> **Current release:** `v0.5.5`  
+> **Authoritative repository:** `ariaPersian/FortiGate-Offline-Update-Orchestrator-Private`  
 > **Maturity:** pre-1.0 operational tooling with a validated reference deployment, not a universal compatibility claim.
+
+The former public repository is not the production source of truth. Existing checkouts that still point to it must follow the [private repository synchronization guide](docs/private-repository-sync.md) before upgrading.
 
 FGOps does **not** distribute FortiGuard packages, firmware, licenses, or credentials. Operators are responsible for obtaining authorized packages, complying with applicable vendor terms, and validating every package family against the exact FortiGate model and FortiOS build before unattended use.
 
 ## Why FGOps exists
 
-Offline or restricted FortiGate environments often require more than copying a package to a TFTP server. A safe update workflow must establish package identity, validate the target appliance, preserve a recoverable configuration backup, apply only approved package families, verify the resulting FortiGuard object versions, and retain auditable evidence.
+Offline or restricted FortiGate environments require more than copying a package to a TFTP server. A controlled update workflow must establish content identity, validate the target appliance, preserve a recoverable configuration backup, apply only approved package families, verify the resulting FortiGuard object versions, retain auditable evidence, and provide operational logs that survive Scheduled Task execution.
 
-FGOps implements that workflow as a standalone Windows service-style agent. GitHub is used for source control, review, and CI; it is not required in the production runtime path.
+FGOps implements that workflow as a standalone Windows service-style agent. GitHub is used for private source control, review, and CI; it is not required in the production runtime path.
 
 ## End-to-end workflow
 
 ```text
 Windows Scheduled Task (SYSTEM)
+  -> start a daily UTF-8 runtime journal
   -> poll a configured source page
   -> resolve the selected FortiGate bundle link
   -> download with TLS, size, and timeout limits
@@ -35,7 +39,8 @@ Windows Scheduled Task (SYSTEM)
   -> apply only explicitly enabled package families
   -> compare FortiGuard object versions before and after each restore
   -> run postflight checks and write JSON/TXT evidence
-  -> stop TFTP and persist the archive result
+  -> persist structured result and exit-code events in the daily log
+  -> stop TFTP and persist the archive lifecycle state
 ```
 
 ## Validated reference profile
@@ -47,10 +52,11 @@ Windows Scheduled Task (SYSTEM)
 | FortiOS | 6.4.16 build 2098 |
 | VDOM mode | Multiple VDOM, global-context execution |
 | Validated package set | AV, IPS, APDB, MCDB, MMDB |
-| Optional package | FFDB, only after target-specific validation |
+| Excluded by default | FFDB after repeated return code `49` with unchanged ISDB versions |
+| Validated live outcome | AV/IPS/APDB/MCDB already current; MMDB increased from `93.07607` to `93.07613`; overall `SUCCESS_WITH_WARNING` |
 | Out of scope | Firmware upgrade/downgrade, signature bypass, security-level reduction, Botnet automation |
 
-The validated FortiGate rejected the tested third-party FFDB file with FortiOS return code `49` while the corresponding database versions remained unchanged. FFDB is therefore excluded from the recommended default allowlist. FGOps can perform bounded version polling after code `49`, but it still fails closed unless the expected object version changes.
+The tested third-party FFDB file transferred to FortiOS but failed activation with return code `49`; `Internet-service Database Apps` and `Internet-service Full Database Maps` remained unchanged. FFDB is therefore excluded from the recommended default allowlist. FGOps retains bounded FFDB polling support for controlled diagnostics, but it fails closed unless the expected version changes.
 
 Other FortiGate models, FortiOS branches, package publishers, database families, authentication methods, and network topologies require independent validation. Do not interpret the reference profile as a vendor certification.
 
@@ -69,6 +75,8 @@ Other FortiGate models, FortiOS branches, package publishers, database families,
 - Windows DPAPI `LocalMachine` secret storage with restrictive NTFS ACLs.
 - `prepare_only`, exact-manifest `approval`, and `unattended` execution policies.
 - JSON/TXT evidence for preflight, backup, apply, and command output.
+- One append-only UTF-8 runtime log per local calendar day.
+- Configurable daily-log retention and log level.
 - Optional Telegram notifications with tokens kept out of YAML.
 
 ## Safety model
@@ -86,17 +94,38 @@ FGOps is designed to fail closed. A controlled apply is blocked when any mandato
 - unconfirmed package outcome;
 - failed postflight validation.
 
-A successful TFTP transfer proves delivery only. FGOps requires object-version evidence to classify the package result.
+A successful TFTP transfer proves delivery only. FGOps requires object-version evidence to classify package activation. Daily logging is observational and must not weaken package selection, target validation, backup, or result-classification gates.
 
 ## Requirements
 
 - Windows 10/11 or Windows Server suitable for a dedicated management VM.
 - Python `3.11` or newer.
+- Access to the authoritative private repository for installation and upgrades.
 - Network reachability from the FGOps VM to the FortiGate management interface.
 - SSH access with permissions appropriate to the selected operation.
 - UDP/69 reachability from the FortiGate to the temporary FGOps TFTP endpoint.
 - Independently verified FortiGate SSH host-key fingerprint.
 - Authorized offline signature packages compatible with the target system.
+
+## Repository checkout and upgrades
+
+Clone the private repository for a new installation:
+
+```powershell
+git clone `
+  https://github.com/ariaPersian/FortiGate-Offline-Update-Orchestrator-Private.git `
+  C:\FGOps
+```
+
+Verify an existing checkout before pulling:
+
+```powershell
+Set-Location C:\FGOps
+git remote -v
+git status
+```
+
+Both fetch and push URLs must point to the private repository. A checkout that reports a forced update, branch divergence, or a remote URL for the former public repository must follow [`docs/private-repository-sync.md`](docs/private-repository-sync.md). Do not merge unrelated public/private histories into the production checkout merely to make `git pull` succeed.
 
 ## Installation
 
@@ -113,7 +142,13 @@ py -3.13 -m venv C:\FGOps\venv
   --package-map-source C:\FGOps\config\fortios64-package-map.yml
 ```
 
-Copy and adapt [`config/agent.example.yml`](config/agent.example.yml). Keep production addresses, fingerprints, credentials, evidence, backups, downloaded archives, and package files outside Git.
+Copy and adapt [`config/agent.example.yml`](config/agent.example.yml). Keep production addresses, fingerprints, credentials, evidence, backups, downloaded archives, logs, and package files outside Git.
+
+Confirm the installed version:
+
+```powershell
+& C:\FGOps\venv\Scripts\python.exe -m pip show fgops
+```
 
 ## Minimum configuration model
 
@@ -151,7 +186,7 @@ apply:
   package_order: [AV, IPS, APDB, MCDB, MMDB]
 ```
 
-Package presence in a downloaded archive does not make it eligible for installation. `execution.enabled_packages` is the authoritative apply allowlist; `apply.package_order` only orders packages that already passed that filter.
+Package presence in a downloaded archive does not make it eligible for installation. `execution.enabled_packages` is the authoritative apply allowlist; `apply.package_order` only orders packages that already passed that filter. FFDB may remain visible in a manifest inventory while being excluded from the actual apply sequence.
 
 ## Validate before the first live restore
 
@@ -218,7 +253,7 @@ fgops-agent `
 
 ### `unattended`
 
-An eligible manifest runs through the same preflight, mandatory backup, package-hash verification, allowlist, version checks, postflight, and audit gates without interactive approval. Failed or review-required archives are not replayed automatically.
+An eligible manifest runs through the same preflight, mandatory backup, package-hash verification, allowlist, version checks, postflight, logging, and audit gates without interactive approval. Failed or review-required archives are not replayed automatically.
 
 Enable unattended execution only after at least one complete approval-mode evidence set has been reviewed and accepted for the exact target profile.
 
@@ -231,6 +266,8 @@ Enable unattended execution only after at least one complete approval-mode evide
 | FortiGate explicitly completed transfer and versions were already current | `SKIPPED_NO_UPDATE` |
 | Expected object missing or unchanged without a trusted successful-transfer outcome | `FAILED_UNCONFIRMED` |
 | Version decreased, validation failed, backup failed, or target identity changed | `FAILED` |
+
+A cycle with one or more `SKIPPED_NO_UPDATE` package results can finish as `SUCCESS_WITH_WARNING`; this is a completed safe cycle, not a failed apply.
 
 ## Schedule the policy cycle
 
@@ -245,6 +282,30 @@ Enable unattended execution only after at least one complete approval-mode evide
 
 The task runs as `SYSTEM`, prevents overlapping runs, and obeys `execution.mode`. Schedule live application within a maintenance window appropriate to the managed environment.
 
+## Daily runtime logs
+
+Every `fgops-agent` invocation writes structured events to one UTF-8 file per local calendar day:
+
+```text
+C:\ProgramData\FGOps\logs\fgops-YYYY-MM-DD.log
+```
+
+The journal records command start, result payload, exit code, secret metadata without plaintext values, and unhandled exceptions. The default retention is 30 daily files.
+
+```powershell
+$Today = Get-Date -Format "yyyy-MM-dd"
+Get-Content "C:\ProgramData\FGOps\logs\fgops-$Today.log" -Wait
+```
+
+Optional machine environment settings:
+
+```powershell
+[Environment]::SetEnvironmentVariable("FGOPS_LOG_RETENTION_DAYS", "30", "Machine")
+[Environment]::SetEnvironmentVariable("FGOPS_LOG_LEVEL", "INFO", "Machine")
+```
+
+See [Daily runtime logging](docs/daily-runtime-logging.md) for retention, security, search, and troubleshooting guidance.
+
 ## Runtime data
 
 Runtime files belong outside the repository:
@@ -257,6 +318,7 @@ C:\ProgramData\FGOps\secrets\                 encrypted local secrets
 C:\ProgramData\FGOps\evidence\                preflight and backup evidence
 C:\ProgramData\FGOps\evidence\backups\        encrypted full-config backups
 C:\ProgramData\FGOps\reports\                 apply reports
+C:\ProgramData\FGOps\logs\                    daily runtime journals
 C:\ProgramData\FGOps\tftp\                    per-run temporary TFTP roots
 ```
 
@@ -292,9 +354,11 @@ tests/                   automated test suite
 
 - [Architecture and trust boundaries](docs/architecture.md)
 - [Standalone Windows deployment](docs/standalone-agent.md)
+- [Private repository synchronization](docs/private-repository-sync.md)
 - [Read-only FortiGate preflight](docs/read-only-preflight.md)
 - [Backup-only validation](docs/backup-test.md)
 - [Controlled apply runbook](docs/controlled-apply.md)
+- [Daily runtime logging](docs/daily-runtime-logging.md)
 - [Production operations and recovery](docs/operations.md)
 - [Security policy and private vulnerability reporting](SECURITY.md)
 - [Contribution guidelines](CONTRIBUTING.md)
@@ -307,7 +371,7 @@ Read [`CONTRIBUTING.md`](CONTRIBUTING.md) before opening a pull request.
 
 ## Security
 
-Do not report vulnerabilities or operational secrets in public issues. Follow [`SECURITY.md`](SECURITY.md) for the supported reporting process and the repository's mandatory security controls.
+Do not report vulnerabilities or operational secrets in issue threads. Follow [`SECURITY.md`](SECURITY.md) for the supported reporting process and the repository's mandatory security controls.
 
 ## License
 
