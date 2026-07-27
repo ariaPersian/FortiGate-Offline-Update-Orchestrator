@@ -7,15 +7,37 @@ htmlcov/
 dist/
 build/
 *.egg-info/
+
+# Downloaded or vendor-supplied update content
 *.zip
 *.pkg
+
+# Runtime output and FortiGate configuration material
 *.out
 *.conf
 *.log
+*.bak
+incoming/
+quarantine/
+state/
+reports/
+evidence/
+tftp/
+backups/
+
+# Credentials, keys, and local configuration
 .env
+.env.*
+*.key
+*.pem
+*.pfx
+*.p12
+secret-store.json
+secrets/
 secrets*.yml
+*.local.yml
+config.yml
+config/agent.yml
+config/agent.local.yml
 config/devices.yml
 config/approval-policy.yml
-state/
-quarantine/
-reports/
