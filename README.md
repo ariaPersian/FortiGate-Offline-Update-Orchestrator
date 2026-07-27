@@ -1,14 +1,27 @@
-# FGOps
+# FGOps — FortiGate Offline Update Orchestrator
 
-**FortiGate Offline Update Orchestrator** is a Windows-based agent for discovering, preparing, backing up, applying, and auditing offline FortiGuard signature updates on FortiGate appliances that cannot retrieve updates directly from FortiGuard.
+[![CI](https://github.com/ariaPersian/FortiGate-Offline-Update-Orchestrator/actions/workflows/ci.yml/badge.svg)](https://github.com/ariaPersian/FortiGate-Offline-Update-Orchestrator/actions/workflows/ci.yml)
+[![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-3776AB)](https://www.python.org/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-> Current milestone: `v0.5.4`. The validated deployment is a standalone Windows VM managing a FortiGate 300D running FortiOS 6.4.16 in multiple-VDOM mode. The architecture is configurable, but other models, FortiOS branches, package publishers, and database families must be validated independently before unattended use.
+**FGOps** is a policy-driven Windows agent for discovering, preparing, backing up, applying, and auditing offline FortiGuard signature updates on FortiGate appliances that cannot retrieve updates directly from FortiGuard.
 
-## What FGOps does
+> **Current release:** `v0.5.4`  
+> **Maturity:** pre-1.0 operational tooling with a validated reference deployment, not a universal compatibility claim.
+
+FGOps does **not** distribute FortiGuard packages, firmware, licenses, or credentials. Operators are responsible for obtaining authorized packages, complying with applicable vendor terms, and validating every package family against the exact FortiGate model and FortiOS build before unattended use.
+
+## Why FGOps exists
+
+Offline or restricted FortiGate environments often require more than copying a package to a TFTP server. A safe update workflow must establish package identity, validate the target appliance, preserve a recoverable configuration backup, apply only approved package families, verify the resulting FortiGuard object versions, and retain auditable evidence.
+
+FGOps implements that workflow as a standalone Windows service-style agent. GitHub is used for source control, review, and CI; it is not required in the production runtime path.
+
+## End-to-end workflow
 
 ```text
 Windows Scheduled Task (SYSTEM)
-  -> poll a configured download page
+  -> poll a configured source page
   -> resolve the selected FortiGate bundle link
   -> download with TLS, size, and timeout limits
   -> identify the archive by SHA-256
@@ -25,9 +38,7 @@ Windows Scheduled Task (SYSTEM)
   -> stop TFTP and persist the archive result
 ```
 
-GitHub is the development and review system. It is not required in the production runtime path, and no self-hosted GitHub runner is required.
-
-## Validated operational profile
+## Validated reference profile
 
 | Area | Validated value |
 |---|---|
@@ -39,26 +50,55 @@ GitHub is the development and review system. It is not required in the productio
 | Optional package | FFDB, only after target-specific validation |
 | Out of scope | Firmware upgrade/downgrade, signature bypass, security-level reduction, Botnet automation |
 
-The tested FortiGate rejected the third-party FFDB file with FortiOS return code `49` while its Internet-service database versions remained unchanged. FFDB is therefore not part of the recommended default allowlist. FGOps can poll FFDB versions for up to 30 minutes after code `49`, but it still fails closed unless a version change is observed.
+The validated FortiGate rejected the tested third-party FFDB file with FortiOS return code `49` while the corresponding database versions remained unchanged. FFDB is therefore excluded from the recommended default allowlist. FGOps can perform bounded version polling after code `49`, but it still fails closed unless the expected object version changes.
+
+Other FortiGate models, FortiOS branches, package publishers, database families, authentication methods, and network topologies require independent validation. Do not interpret the reference profile as a vendor certification.
 
 ## Core capabilities
 
-- configurable source-page monitoring and link matching;
-- native/system TLS validation, bounded downloads, and atomic file replacement;
-- SHA-256 archive deduplication even when a publisher reuses the same URL;
-- safe ZIP extraction and package-kind inventory;
-- local manifest and state persistence outside the repository;
-- SSH host-key pinning and expected device identity checks;
-- encrypted full-config backup before every controlled apply;
-- temporary TFTP server bound to a specified management address;
-- package allowlist, deterministic order, stop-on-failure, and downgrade protection;
-- before/after version verification instead of trusting transfer success alone;
-- Windows DPAPI machine-scoped secret storage with restrictive NTFS ACLs;
-- `prepare_only`, exact-manifest `approval`, and `unattended` policies;
-- JSON/TXT preflight, backup, apply, and command-output evidence;
-- optional Telegram notifications.
+- Configurable source-page monitoring and link matching.
+- Native/system TLS validation, bounded downloads, and atomic file replacement.
+- SHA-256 archive deduplication even when a publisher reuses the same URL.
+- Safe ZIP extraction and package-kind inventory.
+- Immutable local manifests and atomic lifecycle state.
+- SSH host-key pinning and expected target identity checks.
+- Encrypted `full-config` backup before every controlled apply.
+- Temporary TFTP server bound to a specified management interface.
+- Explicit package allowlist, deterministic order, stop-on-failure, and downgrade protection.
+- Before/after object-version verification instead of trusting transfer success alone.
+- Windows DPAPI `LocalMachine` secret storage with restrictive NTFS ACLs.
+- `prepare_only`, exact-manifest `approval`, and `unattended` execution policies.
+- JSON/TXT evidence for preflight, backup, apply, and command output.
+- Optional Telegram notifications with tokens kept out of YAML.
 
-## Install on a Windows VM
+## Safety model
+
+FGOps is designed to fail closed. A controlled apply is blocked when any mandatory gate fails, including:
+
+- changed or unverified SSH host key;
+- hostname, model, firmware branch, or build mismatch;
+- unknown or disabled package family;
+- package or archive SHA-256 mismatch;
+- missing or empty encrypted backup;
+- downgrade detection;
+- invalid-signature or wrong-firmware responses;
+- missing expected FortiGuard object after restore;
+- unconfirmed package outcome;
+- failed postflight validation.
+
+A successful TFTP transfer proves delivery only. FGOps requires object-version evidence to classify the package result.
+
+## Requirements
+
+- Windows 10/11 or Windows Server suitable for a dedicated management VM.
+- Python `3.11` or newer.
+- Network reachability from the FGOps VM to the FortiGate management interface.
+- SSH access with permissions appropriate to the selected operation.
+- UDP/69 reachability from the FortiGate to the temporary FGOps TFTP endpoint.
+- Independently verified FortiGate SSH host-key fingerprint.
+- Authorized offline signature packages compatible with the target system.
+
+## Installation
 
 ```powershell
 Set-Location C:\FGOps
@@ -73,18 +113,32 @@ py -3.13 -m venv C:\FGOps\venv
   --package-map-source C:\FGOps\config\fortios64-package-map.yml
 ```
 
-Copy and adapt [`config/agent.example.yml`](config/agent.example.yml). Keep production addresses, fingerprints, credentials, evidence, backups, and package files outside Git.
+Copy and adapt [`config/agent.example.yml`](config/agent.example.yml). Keep production addresses, fingerprints, credentials, evidence, backups, downloaded archives, and package files outside Git.
 
 ## Minimum configuration model
 
+The following addresses are documentation-only examples from the TEST-NET ranges and must be replaced locally.
+
 ```yaml
 execution:
-  # Use approval for the first reviewed live run. Change to unattended only after
-  # backup, restore, version comparison, and postflight evidence are accepted.
+  # Keep the first reviewed live operation in approval mode. Enable unattended
+  # only after backup, restore, version comparison, and postflight evidence pass.
   mode: approval
   enabled_packages: [AV, IPS, APDB, MCDB, MMDB]
   reject_unknown_packages: true
   prevent_downgrade: true
+
+device:
+  host: 192.0.2.1
+  port: 22
+  username: fgops-operator
+  host_key_sha256: SHA256:REPLACE_WITH_INDEPENDENTLY_VERIFIED_FINGERPRINT
+  password_env: FGOPS_SSH_PASSWORD
+  expected_hostname: REPLACE_WITH_EXPECTED_HOSTNAME
+  expected_model: REPLACE_WITH_EXPECTED_MODEL
+  expected_firmware_branch: "6.4"
+  expected_build: 2098
+  global_context: true
 
 apply:
   tftp_bind_address: 192.0.2.10
@@ -97,9 +151,9 @@ apply:
   package_order: [AV, IPS, APDB, MCDB, MMDB]
 ```
 
-Package presence in the downloaded ZIP does not make it eligible for installation. `execution.enabled_packages` is the authoritative apply allowlist; `apply.package_order` only orders packages that already passed that filter.
+Package presence in a downloaded archive does not make it eligible for installation. `execution.enabled_packages` is the authoritative apply allowlist; `apply.package_order` only orders packages that already passed that filter.
 
-## Prepare and validate the path
+## Validate before the first live restore
 
 ```powershell
 & C:\FGOps\venv\Scripts\fgops-agent.exe `
@@ -122,19 +176,21 @@ Package presence in the downloaded ZIP does not make it eligible for installatio
   backup-test
 ```
 
-`backup-test` starts the same temporary TFTP path used by controlled apply, exports one encrypted full configuration, verifies its permanent SHA-256 copy, writes evidence, and performs no package restore.
+`scan-host-key` reports the key presented by the network endpoint; it does not prove identity by itself. Verify the fingerprint through a separate trusted administrative path before saving it in configuration.
+
+`backup-test` exercises the same pinned SSH and temporary TFTP path used by controlled apply, exports one encrypted full configuration, verifies the permanent SHA-256 copy, writes evidence, and performs no package restore.
 
 ## Windows machine secret store
 
-Scheduled execution cannot depend on a PowerShell process environment. FGOps stores DPAPI-encrypted ciphertext in:
+Scheduled execution must not depend on a PowerShell process environment that disappears after the interactive session. FGOps stores DPAPI-encrypted ciphertext in:
 
 ```text
 C:\ProgramData\FGOps\secrets\secret-store.json
 ```
 
-The store uses DPAPI `LocalMachine` scope and removes inherited ACLs, granting access only to `SYSTEM` and local Administrators. Machine scope is not an authorization boundary by itself; the NTFS ACL is mandatory.
+The store uses DPAPI `LocalMachine` scope and removes inherited ACLs, granting access only to `SYSTEM` and local Administrators. Machine scope is not an authorization boundary by itself; the restrictive NTFS ACL is mandatory.
 
-Create the required secrets from an elevated shell:
+Create secrets from an elevated shell:
 
 ```powershell
 fgops-agent --config C:\ProgramData\FGOps\config.yml secret set FGOPS_SSH_PASSWORD
@@ -162,19 +218,19 @@ fgops-agent `
 
 ### `unattended`
 
-A new or previously prepared eligible manifest runs through the same preflight, mandatory backup, hash verification, allowlist, version checks, postflight, and audit gates without interactive operator approval. Failed or review-required archives are not replayed automatically.
+An eligible manifest runs through the same preflight, mandatory backup, package-hash verification, allowlist, version checks, postflight, and audit gates without interactive approval. Failed or review-required archives are not replayed automatically.
+
+Enable unattended execution only after at least one complete approval-mode evidence set has been reviewed and accepted for the exact target profile.
 
 ## Result classification
 
 | Evidence | Result |
 |---|---|
 | Expected object version increased | `SUCCESS` |
-| Version increased despite a FortiOS warning/non-zero code | `SUCCESS_WITH_WARNING` |
+| Version increased despite a FortiOS warning or non-zero code | `SUCCESS_WITH_WARNING` |
 | FortiGate explicitly completed transfer and versions were already current | `SKIPPED_NO_UPDATE` |
 | Expected object missing or unchanged without a trusted successful-transfer outcome | `FAILED_UNCONFIRMED` |
-| Version decreased, package validation failed, backup failed, or target identity changed | `FAILED` |
-
-A successful TFTP transfer proves delivery only. FGOps requires the corresponding FortiGuard object state to support the final classification.
+| Version decreased, validation failed, backup failed, or target identity changed | `FAILED` |
 
 ## Schedule the policy cycle
 
@@ -187,9 +243,11 @@ A successful TFTP transfer proves delivery only. FGOps requires the correspondin
   -TaskName "FGOps Offline Update Monitor"
 ```
 
-The task runs as `SYSTEM`, prevents overlapping runs, and obeys `execution.mode`. Schedule live unattended application for a maintenance window appropriate to the managed environment.
+The task runs as `SYSTEM`, prevents overlapping runs, and obeys `execution.mode`. Schedule live application within a maintenance window appropriate to the managed environment.
 
 ## Runtime data
+
+Runtime files belong outside the repository:
 
 ```text
 C:\ProgramData\FGOps\incoming\                 downloaded archives
@@ -202,7 +260,7 @@ C:\ProgramData\FGOps\reports\                 apply reports
 C:\ProgramData\FGOps\tftp\                    per-run temporary TFTP roots
 ```
 
-## Commands
+## Command reference
 
 ```text
 fgops-agent init
@@ -219,6 +277,17 @@ fgops-agent apply --manifest-id ... [--approve-manifest ...]
 fgops-agent status
 ```
 
+## Project layout
+
+```text
+config/                 package map and sanitized example configuration
+docs/                   architecture, deployment, operations, and runbooks
+scripts/                Windows deployment and Scheduled Task helpers
+src/fgops/               application source
+tests/                   automated test suite
+.github/workflows/       continuous integration
+```
+
 ## Documentation
 
 - [Architecture and trust boundaries](docs/architecture.md)
@@ -226,9 +295,26 @@ fgops-agent status
 - [Read-only FortiGate preflight](docs/read-only-preflight.md)
 - [Backup-only validation](docs/backup-test.md)
 - [Controlled apply runbook](docs/controlled-apply.md)
-- [Production operations](docs/operations.md)
-- [Security policy](SECURITY.md)
+- [Production operations and recovery](docs/operations.md)
+- [Security policy and private vulnerability reporting](SECURITY.md)
+- [Contribution guidelines](CONTRIBUTING.md)
+
+## Contributing
+
+Issues and pull requests are welcome when they include a clear scope, tests for behavioral changes, and documentation aligned with produced evidence. Do not submit credentials, private keys, production IP addresses, FortiGate backups, package files, bot tokens, or unsanitized operational logs.
+
+Read [`CONTRIBUTING.md`](CONTRIBUTING.md) before opening a pull request.
+
+## Security
+
+Do not report vulnerabilities or operational secrets in public issues. Follow [`SECURITY.md`](SECURITY.md) for the supported reporting process and the repository's mandatory security controls.
+
+## License
+
+FGOps is licensed under the [MIT License](LICENSE).
+
+The FGOps license applies to this repository's original source code and documentation. It does not grant rights to Fortinet software, FortiGuard content, third-party update packages, trademarks, or other externally supplied materials.
 
 ## Disclaimer
 
-FGOps is independent and is not affiliated with or endorsed by Fortinet or any package publisher. A discovered or successfully downloaded package is not automatically trusted or compatible. Use only packages you are authorized to obtain and validate each package family against the exact target model and FortiOS branch before unattended deployment.
+FGOps is an independent project and is not affiliated with, maintained by, sponsored by, or endorsed by Fortinet or any package publisher. A discovered or successfully downloaded package is not automatically trusted or compatible. Use only packages you are authorized to obtain, preserve an independent recovery path, and validate every package family against the exact target model and FortiOS branch before unattended deployment.
