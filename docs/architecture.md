@@ -1,6 +1,8 @@
 # FGOps architecture
 
-FGOps separates internet-facing bundle discovery from private-network FortiGate management while keeping the complete production runtime on one controlled Windows VM.
+FGOps v0.5.5 separates internet-facing bundle discovery from private-network FortiGate management while keeping the complete production runtime on one controlled Windows VM.
+
+The authoritative source repository is `ariaPersian/FortiGate-Offline-Update-Orchestrator-Private`. GitHub hosts private source code, pull requests, and CI; GitHub is not in the production runtime data path and device access does not require a self-hosted runner.
 
 ## Runtime components
 
@@ -25,9 +27,12 @@ DPAPI secret loader -> pinned SSH preflight -> temporary TFTP
         |                                      +-> selected package downloads
         v
 Before/after FortiGuard version comparison -> postflight -> JSON/TXT evidence
+        |
+        v
+Daily runtime journal -> command result -> exit code -> exception evidence
 ```
 
-GitHub hosts source code, pull requests, and CI. GitHub is not in the runtime data path, and production device access does not require a self-hosted GitHub runner.
+Every `fgops-agent` invocation starts a daily journal before loading the full YAML configuration. This bootstrap path captures early configuration and command failures as well as normal Scheduled Task results.
 
 ## Source and preparation plane
 
@@ -78,7 +83,8 @@ The device-changing path is deliberately narrow:
 9. read `diagnose autoupdate versions` after each package;
 10. stop on blocking failure when configured;
 11. run postflight and write reports;
-12. stop TFTP and clean the temporary root after a successful cycle.
+12. stop TFTP and clean the temporary root after a successful cycle;
+13. append the structured cycle result and exit code to the daily runtime log.
 
 Only the standard FortiOS confirmation prompt is answered automatically. Signature errors, wrong-firmware warnings, downgrade indications, identity changes, backup failures, and hash mismatches fail closed.
 
@@ -97,7 +103,9 @@ The validated unattended profile is:
 AV -> IPS -> APDB -> MCDB -> MMDB
 ```
 
-FFDB is optional and target-specific. On the validated FortiGate 300D/FortiOS 6.4.16 deployment, the tested third-party FFDB package transferred successfully but was rejected with return code `49` and no Internet-service database version increase. The recommended default therefore excludes FFDB.
+The validated end-to-end cycle completed as `SUCCESS_WITH_WARNING`: AV, IPS, APDB, and MCDB were already current, while MMDB increased from `93.07607` to `93.07613`.
+
+FFDB is target-specific. On the validated FortiGate 300D/FortiOS 6.4.16 deployment, the tested third-party FFDB package transferred successfully but was rejected with return code `49` and no Internet-service database version increase. The recommended default therefore excludes FFDB.
 
 ## Result model
 
@@ -113,7 +121,7 @@ A successful TFTP transfer proves delivery only. It does not prove that FortiOS 
 
 ## FFDB return code 49
 
-FGOps v0.5.4 contains a bounded FFDB-specific guard:
+The FFDB guard introduced in v0.5.4 remains present in v0.5.5:
 
 ```text
 FFDB restore returns 49
@@ -126,6 +134,18 @@ FFDB restore returns 49
 
 The polling window can be overridden for controlled diagnostics through `FGOPS_FFDB_MAX_WAIT_SECONDS` and `FGOPS_FFDB_POLL_SECONDS`. A timeout does not convert code `49` into success.
 
+## Operational audit plane
+
+FGOps writes one append-only UTF-8 file per local calendar day:
+
+```text
+C:\ProgramData\FGOps\logs\fgops-YYYY-MM-DD.log
+```
+
+The journal records command start, structured result payload, exit code, and unhandled exceptions. Secret commands record metadata only; plaintext secret values are not written. The default retention is 30 daily files and can be adjusted with `FGOPS_LOG_RETENTION_DAYS`.
+
+Logging is intentionally non-blocking. Failure to delete an expired file that is temporarily locked must not prevent an update cycle. Logs supplement but do not replace immutable manifests, JSON/TXT evidence, reports, state, or encrypted backups.
+
 ## Trust boundaries
 
 - The configured publisher and package files are outside the FGOps trust boundary.
@@ -134,7 +154,8 @@ The polling window can be overridden for controlled diagnostics through `FGOPS_F
 - Windows DPAPI machine scope binds ciphertext to the machine; restrictive ACLs remain mandatory.
 - SSH host-key pinning authenticates the configured management endpoint.
 - TFTP is a temporary transport on the management network and is not an authenticity or confidentiality control.
-- JSON/TXT reports, backups, state, and quarantine data are operationally sensitive and remain outside Git.
+- JSON/TXT reports, backups, state, quarantine data, and daily logs are operationally sensitive and remain outside Git.
+- The private Git repository is a development and release-control boundary, not a runtime secret or evidence store.
 
 ## Explicit non-goals
 
