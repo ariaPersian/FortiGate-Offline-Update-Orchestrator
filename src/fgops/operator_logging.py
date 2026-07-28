@@ -3,14 +3,15 @@ from __future__ import annotations
 import logging
 import os
 import re
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Iterable
 
 from .daily_logging import DailyFileHandler, LocalIsoFormatter
 
 _OPERATOR_LOG_RE = re.compile(r"^fgops-operator-(\d{4}-\d{2}-\d{2})\.log$")
+_DEFAULT_RETENTION_DAYS = 30
 
 _MARKERS = {
     "TODO": "⬜",
@@ -46,12 +47,24 @@ class OperatorDailyFileHandler(DailyFileHandler):
                     continue
 
 
+def _configured_retention(value: int | None) -> int:
+    if value is not None:
+        return max(1, value)
+    raw = os.environ.get("FGOPS_LOG_RETENTION_DAYS")
+    if raw is None:
+        return _DEFAULT_RETENTION_DAYS
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return _DEFAULT_RETENTION_DAYS
+
+
 def configure_operator_logging(
     storage_root: Path,
     *,
     logger_name: str = "fgops.operator",
-    retention_days: int = 30,
-    clock=None,
+    retention_days: int | None = None,
+    clock: Callable[[], datetime] | None = None,
 ) -> logging.Logger:
     """Configure the human-readable operator journal below ``<storage_root>/logs``."""
 
@@ -66,7 +79,7 @@ def configure_operator_logging(
 
     handler = OperatorDailyFileHandler(
         storage_root / "logs",
-        retention_days=max(1, retention_days),
+        retention_days=_configured_retention(retention_days),
         clock=clock,
     )
     handler.setLevel(logging.INFO)
@@ -183,9 +196,16 @@ class OperatorChecklist:
                 f"  {_MARKERS.get(step.state, _MARKERS['TODO'])} "
                 f"[{index}/{len(self.steps)}] {step.label}{detail}"
             )
-        final_state = "FAILED" if exit_code else "SUCCESS"
-        if "WARNING" in overall_status or "NOTIFICATION_ERROR" in overall_status:
+        if exit_code or any(step.state == "FAILED" for step in self.steps):
+            final_state = "FAILED"
+        elif (
+            "WARNING" in overall_status
+            or "NOTIFICATION_ERROR" in overall_status
+            or any(step.state == "WARNING" for step in self.steps)
+        ):
             final_state = "WARNING"
+        else:
+            final_state = "SUCCESS"
         self._emit(
             f"{_MARKERS[final_state]} نتیجه نهایی: {overall_status} | کد خروج: {exit_code}"
         )
@@ -207,9 +227,7 @@ class OperatorChecklist:
         step.detail = self._clean_detail(detail)
         index = self.steps.index(step) + 1
         suffix = f" — {step.detail}" if step.detail else ""
-        self._emit(
-            f"{_MARKERS[state]} [{index}/{len(self.steps)}] {step.label}{suffix}"
-        )
+        self._emit(f"{_MARKERS[state]} [{index}/{len(self.steps)}] {step.label}{suffix}")
 
     def _emit(self, message: str) -> None:
         self.logger.info("run=%s %s", self.run_id, message)
@@ -227,6 +245,7 @@ def default_operator_steps(command: str) -> tuple[tuple[str, str], ...]:
             ("prepare", "دانلود، کنترل و آماده‌سازی بسته"),
             ("notification", "ارسال اعلان وضعیت"),
             ("execution_gate", "بررسی مجوز اجرای به‌روزرسانی"),
+            ("preflight", "بررسی ایمن وضعیت FortiGate پیش از اعمال"),
             ("backup", "تهیه نسخه پشتیبان رمزگذاری‌شده"),
             ("packages", "اعمال بسته‌ها و کنترل نتیجه"),
             ("verification", "بازبینی نهایی وضعیت FortiGate"),
