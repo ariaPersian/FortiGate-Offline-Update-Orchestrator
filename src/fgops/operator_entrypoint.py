@@ -93,7 +93,11 @@ def _record_apply(
         checklist.skip("backup", "طبق تنظیمات، پشتیبان الزامی نبود.")
 
     raw_packages = apply_result.get("package_results")
-    packages = [item for item in raw_packages if isinstance(item, dict)] if isinstance(raw_packages, list) else []
+    packages = (
+        [item for item in raw_packages if isinstance(item, dict)]
+        if isinstance(raw_packages, list)
+        else []
+    )
     _record_packages(checklist, packages)
 
     _mark_by_status(checklist, "verification", status, f"نتیجه اعمال: {status}")
@@ -176,6 +180,7 @@ def _record_result(
         if monitor_status == "NO_CHANGE":
             checklist.skip("execution_gate", "نسخه جدیدی برای اعمال وجود ندارد.")
             _record_apply(checklist, None, require_backup=require_backup)
+            checklist.success("report", monitor.get("message") or status)
         elif apply_result:
             checklist.success("execution_gate", f"حالت اجرا: {execution_mode or '-'}")
             _record_apply(checklist, apply_result, require_backup=require_backup)
@@ -257,15 +262,15 @@ def _record_result(
     else:
         _mark_by_status(checklist, "operation", status, status)
 
-    if exit_code != 0 and operator_action is None:
+    if "NOTIFICATION_ERROR" in status:
+        operator_action = "تنظیمات و دسترسی Telegram را بررسی کنید؛ عملیات اصلی ثبت شده است."
+    elif exit_code != 0 and operator_action is None:
         operator_action = (
             "مراحل دارای ❌ یا ⚠️ را بررسی کنید و برای جزئیات فنی به فایل "
             "fgops-YYYY-MM-DD.log در همین پوشه مراجعه کنید."
         )
     elif status == "NO_CHANGE":
         operator_action = "اقدامی لازم نیست؛ بسته جدیدی شناسایی نشده است."
-    elif "NOTIFICATION_ERROR" in status:
-        operator_action = "تنظیمات و دسترسی Telegram را بررسی کنید؛ عملیات اصلی ثبت شده است."
     return status, operator_action
 
 
@@ -338,8 +343,13 @@ def main() -> int:
     try:
         exit_code = int(agent_cli.main(argv))
         if exit_code != 0 and observed_status == "FAILED":
-            checklist.fail_first_unfinished(
-                "عملیات پیش از تولید نتیجه متوقف شد؛ جزئیات در لاگ فنی ثبت شده است."
+            if not any(step.state == "FAILED" for step in checklist.steps):
+                checklist.fail_first_unfinished(
+                    "عملیات پیش از تولید نتیجه متوقف شد؛ جزئیات در لاگ فنی ثبت شده است."
+                )
+            operator_action = operator_action or (
+                "مرحله دارای ❌ را بررسی کنید و سپس جزئیات فنی همان تاریخ را در "
+                "fgops-YYYY-MM-DD.log بخوانید."
             )
         elif exit_code == 0 and observed_status == "FAILED":
             observed_status = "SUCCESS"
