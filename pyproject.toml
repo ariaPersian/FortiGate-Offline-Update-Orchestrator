@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "fgops"
-version = "0.5.5"
+version = "0.5.6"
 description = "Standalone and policy-driven offline FortiGate update orchestration"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -26,7 +26,7 @@ dev = [
 
 [project.scripts]
 fgops = "fgops.cli:main"
-fgops-agent = "fgops.entrypoint:main"
+fgops-agent = "fgops.operator_entrypoint:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
