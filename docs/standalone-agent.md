@@ -1,13 +1,14 @@
 # Standalone Windows agent
 
-FGOps v0.5.5 uses a local Windows agent as the primary deployment model for a single FortiGate management target. The authoritative source is the private repository `ariaPersian/FortiGate-Offline-Update-Orchestrator-Private`. GitHub is not required during scheduled production execution.
+FGOps v0.5.6 uses a local Windows agent as the primary deployment model for a single FortiGate management target. The authoritative source is the private repository `ariaPersian/FortiGate-Offline-Update-Orchestrator-Private`. GitHub is not required during scheduled production execution.
 
 ## Runtime flow
 
 ```text
 Scheduled Task running as SYSTEM
   -> fgops-agent cycle
-  -> open or append today's runtime log
+  -> open or append today's operator and technical journals
+  -> write the operator ToDo checklist
   -> poll configured source page
   -> discover the matching bundle link
   -> bounded atomic ZIP download
@@ -20,7 +21,7 @@ Scheduled Task running as SYSTEM
   -> temporary restricted TFTP
   -> encrypted full-config backup
   -> selected package restores and version checks
-  -> postflight, report, state update, daily log, cleanup
+  -> postflight, report, state update, checklist summary, and cleanup
 ```
 
 The source parser can match the anchor text, URL, and surrounding list-item context. This supports pages where the product/version label is outside a generic download anchor.
@@ -47,7 +48,7 @@ Confirm the installed version:
 & C:\FGOps\venv\Scripts\python.exe -m pip show fgops
 ```
 
-The expected release for this document is `0.5.5`.
+The expected release for this document is `0.5.6`.
 
 ## Existing checkout and private remote
 
@@ -67,7 +68,7 @@ https://github.com/ariaPersian/FortiGate-Offline-Update-Orchestrator-Private.git
 
 If the checkout still points to the former public repository, or `git fetch` reports a forced update and `git pull --ff-only` reports diverging branches, do not merge or rebase the histories into the production checkout. Follow [Private repository synchronization](private-repository-sync.md): preserve a safety branch and stash, change the remote, fetch the private branch, and align local `main` with `origin/main`.
 
-## Upgrade
+## Upgrade to v0.5.6
 
 Disable scheduling while source and the virtual environment are changed:
 
@@ -77,15 +78,34 @@ Disable-ScheduledTask -TaskName "FGOps Offline Update Monitor"
 Set-Location C:\FGOps
 git fetch --prune origin
 git switch main
-git reset --hard origin/main
+git pull --ff-only
 
 & C:\FGOps\venv\Scripts\python.exe `
-  -m pip install --upgrade --no-user C:\FGOps
+  -m pip install --upgrade --force-reinstall --no-deps C:\FGOps
 
 & C:\FGOps\venv\Scripts\python.exe -m pip show fgops
 ```
 
-Run a foreground `status`, `NO_CHANGE` cycle, `preflight`, or `backup-test` as appropriate. Inspect the daily log before re-enabling the Scheduled Task.
+The reinstall is mandatory for the v0.5.6 logging change because the installed `fgops-agent` console entry point now starts the operator checklist wrapper. A source-only pull can leave an older generated executable entry point in the virtual environment.
+
+Run a harmless foreground validation:
+
+```powershell
+& C:\FGOps\venv\Scripts\fgops-agent.exe `
+  --config C:\ProgramData\FGOps\config.yml `
+  status
+```
+
+Confirm both daily journals were created:
+
+```powershell
+$Today = Get-Date -Format "yyyy-MM-dd"
+Get-Item `
+  "C:\ProgramData\FGOps\logs\fgops-operator-$Today.log", `
+  "C:\ProgramData\FGOps\logs\fgops-$Today.log"
+```
+
+Do not re-enable the Scheduled Task until the operator journal contains a final `نتیجه نهایی:` line for the validation command.
 
 ## Initialize runtime storage
 
@@ -97,6 +117,8 @@ Run a foreground `status`, `NO_CHANGE` cycle, `preflight`, or `backup-test` as a
 ```
 
 Copy [`config/agent.example.yml`](../config/agent.example.yml) and replace all example addresses, target identity values, and host-key fingerprints. Production configuration must remain outside the repository.
+
+The `init` command also produces an operator checklist. Configuration-loading steps are marked as safely skipped because this command creates the initial configuration rather than loading an existing one.
 
 ## Local state and directories
 
@@ -112,7 +134,8 @@ C:\ProgramData\FGOps\secrets\secret-store.json
 C:\ProgramData\FGOps\evidence\
 C:\ProgramData\FGOps\evidence\backups\
 C:\ProgramData\FGOps\reports\
-C:\ProgramData\FGOps\logs\
+C:\ProgramData\FGOps\logs\fgops-operator-YYYY-MM-DD.log
+C:\ProgramData\FGOps\logs\fgops-YYYY-MM-DD.log
 C:\ProgramData\FGOps\tftp\
 ```
 
@@ -140,6 +163,8 @@ Scheduled execution under `SYSTEM` cannot inherit secrets entered in an interact
 
 The CLI displays secret names and timestamps, never plaintext values. The secret store must have inherited ACLs removed and access limited to `SYSTEM` and local Administrators.
 
+The operator journal records only that the secure secret-store operation completed. It does not intentionally include secret values.
+
 ## Validate preparation and management access
 
 ```powershell
@@ -164,6 +189,12 @@ The CLI displays secret names and timestamps, never plaintext values. The secret
 ```
 
 Verify a scanned host key through an independent trusted path before storing it. `backup-test` validates the live SSH/TFTP/full-config backup path without issuing any package restore.
+
+After each command:
+
+1. read the operator journal and confirm the final result;
+2. review any warning or failure row;
+3. open the technical journal and evidence when detailed validation is required.
 
 ## Windows Firewall and TFTP
 
@@ -205,7 +236,7 @@ The task:
 - prevents overlapping instances;
 - starts missed runs when the VM becomes available;
 - executes `cycle`, which obeys the configured policy;
-- writes to the same daily runtime log as foreground commands;
+- writes to both daily journals;
 - does not make `prepare_only` or `approval` unattended merely by being registered.
 
 Inspect it with:
@@ -229,29 +260,44 @@ Re-enable it only after the foreground operation finishes with `SUCCESS`, `SUCCE
 Enable-ScheduledTask -TaskName "FGOps Offline Update Monitor"
 ```
 
-## Daily runtime logging
+## Operator and technical journals
 
-Every agent command writes to:
+Operator journal:
+
+```text
+C:\ProgramData\FGOps\logs\fgops-operator-YYYY-MM-DD.log
+```
+
+Technical journal:
 
 ```text
 C:\ProgramData\FGOps\logs\fgops-YYYY-MM-DD.log
 ```
 
-Display today's log:
+Follow the operator journal during normal monitoring:
+
+```powershell
+$Today = Get-Date -Format "yyyy-MM-dd"
+Get-Content "C:\ProgramData\FGOps\logs\fgops-operator-$Today.log" -Wait
+```
+
+Open the technical journal for structured details:
 
 ```powershell
 $Today = Get-Date -Format "yyyy-MM-dd"
 Get-Content "C:\ProgramData\FGOps\logs\fgops-$Today.log" -Wait
 ```
 
-The default retention is 30 daily files. Optional machine settings are:
+The default retention is 30 daily files for each log type. Optional machine settings are:
 
 ```powershell
 [Environment]::SetEnvironmentVariable("FGOPS_LOG_RETENTION_DAYS", "30", "Machine")
 [Environment]::SetEnvironmentVariable("FGOPS_LOG_LEVEL", "INFO", "Machine")
 ```
 
-See [Daily runtime logging](daily-runtime-logging.md) for event format, search, retention, and security guidance.
+`FGOPS_LOG_LEVEL` controls the technical journal. The operator journal remains an INFO-level checklist.
+
+See [Operator checklist logging](operator-checklist-logging.md) for status symbols and operator actions. See [Daily runtime logging](daily-runtime-logging.md) for technical event format, correlation, retention, and security guidance.
 
 ## Operational package profile
 
@@ -270,7 +316,18 @@ FFDB is intentionally excluded. Add it only after the exact FFDB package source,
 
 - Schedule unattended apply during an approved maintenance window.
 - Monitor available disk space under `C:\ProgramData\FGOps`.
-- Retain encrypted backups, apply reports, evidence, and daily logs according to policy.
+- Retain encrypted backups, apply reports, evidence, and both daily log types according to policy.
 - Periodically test that backups are readable through an approved restore-validation process; do not test a restore on the production appliance merely to validate automation.
 - Review changes to the source-page structure and package filenames after publisher changes.
 - Rotate secrets and re-verify the pinned host key after authorized device replacement or key rotation.
+- Treat an operator run without a final result as unresolved until process state, technical logs, and the FortiGate are checked.
+
+## Related documentation
+
+- [Production operations](operations.md)
+- [Operator checklist logging](operator-checklist-logging.md)
+- [Daily runtime logging](daily-runtime-logging.md)
+- [Private repository synchronization](private-repository-sync.md)
+- [Read-only preflight](read-only-preflight.md)
+- [Backup test](backup-test.md)
+- [Controlled apply](controlled-apply.md)
