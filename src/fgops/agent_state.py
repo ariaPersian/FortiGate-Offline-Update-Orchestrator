@@ -47,12 +47,15 @@ class AgentState:
     def has_successful_archive(self, sha256: str) -> bool:
         # APPLY_FAILED/REVIEW_REQUIRED are intentionally treated as already handled.
         # Re-downloading the same hash must never cause an unattended replay after an
-        # uncertain or partially completed device-changing operation.
+        # uncertain or partially completed device-changing operation. CONTENT_DUPLICATE
+        # means the ZIP bytes differed while the enabled package payload matched an
+        # already applied payload, so it is also terminal for that exact archive hash.
         return (self.archives.get(sha256) or {}).get("status") in {
             "PREPARED",
             "APPLIED",
             "APPLY_FAILED",
             "REVIEW_REQUIRED",
+            "CONTENT_DUPLICATE",
         }
 
 

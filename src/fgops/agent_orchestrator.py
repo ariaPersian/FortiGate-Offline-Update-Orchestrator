@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -19,6 +21,7 @@ class AgentRunResult:
     source_page: str
     download_url: str
     archive_sha256: str | None = None
+    payload_sha256: str | None = None
     archive_path: str | None = None
     manifest_id: str | None = None
     work_dir: str | None = None
@@ -31,6 +34,7 @@ class AgentRunResult:
             "source_page": self.source_page,
             "download_url": self.download_url,
             "archive_sha256": self.archive_sha256,
+            "payload_sha256": self.payload_sha256,
             "archive_path": self.archive_path,
             "manifest_id": self.manifest_id,
             "work_dir": self.work_dir,
@@ -46,6 +50,66 @@ BundleDownloader = Callable[..., DownloadResult]
 def _write_json(path: Path, value: dict[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(value, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+
+def _payload_sha256(packages: list[dict[str, object]], payload_kinds: set[str]) -> str | None:
+    selected: list[tuple[str, str]] = []
+    for item in packages:
+        kind = str(item.get("kind") or "")
+        package_hash = str(item.get("sha256") or "")
+        if kind in payload_kinds and package_hash:
+            selected.append((kind, package_hash))
+    if not selected or {kind for kind, _package_hash in selected} != payload_kinds:
+        return None
+    material = "\n".join(f"{kind}:{package_hash}" for kind, package_hash in sorted(selected))
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
+def _entry_payload_sha256(entry: dict[str, object], payload_kinds: set[str]) -> str | None:
+    recorded = entry.get("payload_sha256")
+    recorded_kinds_raw = entry.get("payload_kinds") or entry.get("planned_packages") or []
+    recorded_kinds = {str(item) for item in recorded_kinds_raw} if isinstance(
+        recorded_kinds_raw, list
+    ) else set()
+    if recorded and recorded_kinds == payload_kinds:
+        return str(recorded)
+
+    work_dir = entry.get("work_dir")
+    if not work_dir:
+        return None
+    manifest_path = Path(str(work_dir)) / "manifest.json"
+    if not manifest_path.is_file():
+        return None
+    try:
+        raw = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return None
+    packages = raw.get("packages") if isinstance(raw, dict) else None
+    if not isinstance(packages, list):
+        return None
+    normalized = [item for item in packages if isinstance(item, dict)]
+    return _payload_sha256(normalized, payload_kinds)
+
+
+def _find_applied_payload(
+    state,
+    *,
+    payload_sha256: str,
+    payload_kinds: set[str],
+    exclude_archive_sha256: str,
+) -> tuple[str, dict[str, object]] | None:
+    for archive_hash, entry in state.archives.items():
+        if archive_hash == exclude_archive_sha256:
+            continue
+        if entry.get("status") not in {"APPLIED", "CONTENT_DUPLICATE"}:
+            continue
+        candidate = _entry_payload_sha256(entry, payload_kinds)
+        if candidate:
+            entry["payload_sha256"] = candidate
+            entry["payload_kinds"] = sorted(payload_kinds)
+        if candidate == payload_sha256:
+            return archive_hash, entry
+    return None
 
 
 def run_agent_once(
@@ -99,6 +163,9 @@ def run_agent_once(
                     source_page=config.source.page_url,
                     download_url=downloaded.source_url,
                     archive_sha256=downloaded.sha256,
+                    payload_sha256=(
+                        str(entry.get("payload_sha256")) if entry.get("payload_sha256") else None
+                    ),
                     archive_path=str(entry.get("archive_path") or downloaded.path),
                     manifest_id=str(entry["manifest_id"]),
                     work_dir=str(entry["work_dir"]),
@@ -117,11 +184,14 @@ def run_agent_once(
                 source_page=config.source.page_url,
                 download_url=downloaded.source_url,
                 archive_sha256=downloaded.sha256,
+                payload_sha256=(
+                    str(entry.get("payload_sha256")) if entry.get("payload_sha256") else None
+                ),
                 archive_path=str(downloaded.path),
                 manifest_id=str(entry.get("manifest_id")) if entry.get("manifest_id") else None,
                 work_dir=str(entry.get("work_dir")) if entry.get("work_dir") else None,
                 planned_packages=tuple(str(item) for item in entry.get("planned_packages", [])),
-                message="The archive hash was already prepared successfully.",
+                message="The archive hash was already handled successfully.",
             )
 
         work_dir = config.storage.quarantine / downloaded.sha256[:16]
@@ -138,6 +208,55 @@ def run_agent_once(
         )
         if not planned:
             raise ValueError("The bundle contains no enabled package type.")
+        payload_kinds = set(planned)
+
+        manifest_packages = [item.to_dict() for item in manifest.packages]
+        payload_sha256 = _payload_sha256(manifest_packages, payload_kinds)
+        if payload_sha256 is None:
+            raise ValueError("Unable to calculate enabled package payload SHA-256.")
+
+        duplicate = _find_applied_payload(
+            state,
+            payload_sha256=payload_sha256,
+            payload_kinds=payload_kinds,
+            exclude_archive_sha256=downloaded.sha256,
+        )
+        if duplicate is not None:
+            original_archive_hash, original_entry = duplicate
+            state.archives[downloaded.sha256] = {
+                "status": "CONTENT_DUPLICATE",
+                "prepared_at": utc_now(),
+                "source_url": downloaded.source_url,
+                "archive_path": str(downloaded.path),
+                "payload_sha256": payload_sha256,
+                "payload_kinds": sorted(payload_kinds),
+                "duplicate_of_archive_sha256": original_archive_hash,
+                "duplicate_of_manifest_id": original_entry.get("manifest_id"),
+                "planned_packages": list(planned),
+                "notification_status": "DISABLED",
+            }
+            state.last_result = "NO_CONTENT_CHANGE"
+            save_state(config.storage.state_file, state)
+            shutil.rmtree(work_dir, ignore_errors=True)
+            return AgentRunResult(
+                status="NO_CONTENT_CHANGE",
+                source_page=config.source.page_url,
+                download_url=downloaded.source_url,
+                archive_sha256=downloaded.sha256,
+                payload_sha256=payload_sha256,
+                archive_path=str(downloaded.path),
+                manifest_id=(
+                    str(original_entry.get("manifest_id"))
+                    if original_entry.get("manifest_id")
+                    else None
+                ),
+                work_dir=None,
+                planned_packages=planned,
+                message=(
+                    "The ZIP archive bytes changed, but the enabled package payload is identical "
+                    "to a previously applied payload. SSH, backup, TFTP, and restore were skipped."
+                ),
+            )
 
         plan = {
             "schema_version": 1,
@@ -157,6 +276,8 @@ def run_agent_once(
                 "size": downloaded.size,
                 "content_type": downloaded.content_type,
             },
+            "payload_sha256": payload_sha256,
+            "payload_kinds": sorted(payload_kinds),
             "manifest_id": manifest.manifest_id,
             "planned_packages": list(planned),
             "device_execution_enabled": False,
@@ -172,6 +293,8 @@ def run_agent_once(
             "prepared_at": utc_now(),
             "source_url": downloaded.source_url,
             "archive_path": str(downloaded.path),
+            "payload_sha256": payload_sha256,
+            "payload_kinds": sorted(payload_kinds),
             "manifest_id": manifest.manifest_id,
             "work_dir": str(work_dir),
             "planned_packages": list(planned),
@@ -193,6 +316,7 @@ def run_agent_once(
             source_page=config.source.page_url,
             download_url=downloaded.source_url,
             archive_sha256=downloaded.sha256,
+            payload_sha256=payload_sha256,
             archive_path=str(downloaded.path),
             manifest_id=manifest.manifest_id,
             work_dir=str(work_dir),

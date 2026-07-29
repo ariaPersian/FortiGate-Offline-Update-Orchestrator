@@ -13,7 +13,8 @@ from .operator_logging import (
 )
 
 _FAILED_PACKAGE_STATES = {"FAILED", "FAILED_UNCONFIRMED"}
-_WARNING_PACKAGE_STATES = {"SUCCESS_WITH_WARNING", "SKIPPED_NO_UPDATE"}
+_WARNING_PACKAGE_STATES = {"SUCCESS_WITH_WARNING"}
+_INFO_PACKAGE_STATES = {"SKIPPED_NO_UPDATE"}
 
 
 def _payload(value: Any) -> dict[str, Any]:
@@ -36,10 +37,13 @@ def _mark_by_status(
         checklist.success(key, detail or status)
 
 
-def _record_packages(checklist: OperatorChecklist, package_results: list[dict[str, Any]]) -> None:
+def _record_packages(
+    checklist: OperatorChecklist,
+    package_results: list[dict[str, Any]],
+) -> str:
     if not package_results:
         checklist.warning("packages", "هیچ نتیجه‌ای برای بسته‌ها ثبت نشد.")
-        return
+        return "SUCCESS_WITH_WARNING"
 
     states: list[str] = []
     descriptions: list[str] = []
@@ -50,22 +54,32 @@ def _record_packages(checklist: OperatorChecklist, package_results: list[dict[st
         reason = str(item.get("reason") or "")
         states.append(status)
         descriptions.append(f"{kind}={status}")
-        key = f"package:{kind}:{filename}"
-        checklist.add_step(key, f"بسته {kind}: {filename}")
+        label = f"بسته {kind}: {filename}"
         if status in _FAILED_PACKAGE_STATES:
-            checklist.fail(key, reason or status)
+            checklist.detail("FAILED", label, reason or status)
         elif status in _WARNING_PACKAGE_STATES:
-            checklist.warning(key, reason or status)
+            checklist.detail("WARNING", label, reason or status)
+        elif status in _INFO_PACKAGE_STATES:
+            checklist.detail("INFO", label, reason or status)
         else:
-            checklist.success(key, reason or status)
+            checklist.detail("SUCCESS", label, reason or status)
 
     summary = ", ".join(descriptions)
     if any(state in _FAILED_PACKAGE_STATES for state in states):
         checklist.fail("packages", summary)
-    elif any(state in _WARNING_PACKAGE_STATES for state in states):
+        return "FAILED"
+    if any(state in _WARNING_PACKAGE_STATES for state in states):
         checklist.warning("packages", summary)
-    else:
-        checklist.success("packages", summary)
+        return "SUCCESS_WITH_WARNING"
+    if all(state in _INFO_PACKAGE_STATES for state in states):
+        checklist.success(
+            "packages",
+            "همه بسته‌ها از قبل جاری بودند؛ هیچ تغییر جدیدی روی دیتابیس‌ها لازم نبود.",
+        )
+        return "NO_UPDATE"
+
+    checklist.success("packages", summary)
+    return "SUCCESS"
 
 
 def _record_apply(
@@ -73,15 +87,15 @@ def _record_apply(
     apply_result: dict[str, Any] | None,
     *,
     require_backup: bool,
-) -> None:
+) -> str | None:
     if not apply_result:
         checklist.skip("preflight", "عملیات اعمال اجرا نشد.")
         checklist.skip("backup", "عملیات اعمال اجرا نشد.")
         checklist.skip("packages", "عملیات اعمال اجرا نشد.")
         checklist.skip("verification", "عملیات اعمال اجرا نشد.")
-        return
+        return None
 
-    status = str(apply_result.get("status") or "UNKNOWN")
+    reported_status = str(apply_result.get("status") or "UNKNOWN")
     checklist.success("preflight", "بررسی پیش از اعمال با موفقیت عبور کرده است.")
 
     backup_path = apply_result.get("backup_path")
@@ -98,20 +112,39 @@ def _record_apply(
         if isinstance(raw_packages, list)
         else []
     )
-    _record_packages(checklist, packages)
+    effective_status = _record_packages(checklist, packages)
 
-    _mark_by_status(checklist, "verification", status, f"نتیجه اعمال: {status}")
+    if effective_status == "NO_UPDATE":
+        checklist.success(
+            "verification",
+            "تمام بسته‌های فعال از قبل جاری بودند؛ نتیجه انتقال‌ها کنترل شد و تغییر لازم نبود.",
+        )
+    elif effective_status == "SUCCESS" and reported_status == "SUCCESS_WITH_WARNING":
+        checklist.success(
+            "verification",
+            "عملیات کامل شد؛ بسته‌های بدون تغییر به‌عنوان وضعیت اطلاع‌رسانی ثبت شدند.",
+        )
+    else:
+        _mark_by_status(
+            checklist,
+            "verification",
+            effective_status,
+            f"نتیجه اعمال: {effective_status}",
+        )
+
     report_json = apply_result.get("report_json")
     report_text = apply_result.get("report_text")
     if report_json or report_text:
         checklist.success("report", f"JSON={report_json or '-'} | TEXT={report_text or '-'}")
     else:
         checklist.warning("report", "مسیر گزارش نهایی در نتیجه ثبت نشده است.")
+    return effective_status
 
 
 def _record_monitor(checklist: OperatorChecklist, monitor: dict[str, Any]) -> str:
     status = str(monitor.get("status") or "UNKNOWN")
     archive_sha256 = monitor.get("archive_sha256")
+    payload_sha256 = monitor.get("payload_sha256")
     source_detail = monitor.get("download_url") or monitor.get("source_page")
     checklist.success("source", source_detail)
 
@@ -120,10 +153,21 @@ def _record_monitor(checklist: OperatorChecklist, monitor: dict[str, Any]) -> st
         packages = ", ".join(str(item) for item in monitor.get("planned_packages", []))
         checklist.success(
             "prepare",
-            f"Manifest={manifest_id or '-'} | SHA-256={archive_sha256 or '-'} | بسته‌ها={packages or '-'}",
+            (
+                f"Manifest={manifest_id or '-'} | Archive SHA-256={archive_sha256 or '-'} | "
+                f"Payload SHA-256={payload_sha256 or '-'} | بسته‌ها={packages or '-'}"
+            ),
         )
     elif status == "NO_CHANGE":
-        checklist.skip("prepare", "بسته از قبل آماده شده و تغییر جدیدی وجود ندارد.")
+        checklist.skip("prepare", "همین آرشیو قبلاً پردازش شده و تغییر جدیدی وجود ندارد.")
+    elif status == "NO_CONTENT_CHANGE":
+        checklist.skip(
+            "prepare",
+            (
+                "بایت‌های ZIP تغییر کرده‌اند، اما محتوای بسته‌های فعال با آخرین Payload "
+                "اعمال‌شده یکسان است؛ اتصال SSH، پشتیبان‌گیری و Restore اجرا نشد."
+            ),
+        )
     else:
         _mark_by_status(checklist, "prepare", status, monitor.get("message") or status)
     return status
@@ -162,7 +206,7 @@ def _record_result(
     operator_action: str | None = None
 
     if command == "run":
-        _record_monitor(checklist, payload)
+        status = _record_monitor(checklist, payload)
         checklist.success("report", payload.get("message") or status)
 
     elif command == "cycle":
@@ -177,13 +221,16 @@ def _record_result(
         _record_notifications(checklist, notifications)
         apply_result = payload.get("apply") if isinstance(payload.get("apply"), dict) else None
 
-        if monitor_status == "NO_CHANGE":
-            checklist.skip("execution_gate", "نسخه جدیدی برای اعمال وجود ندارد.")
+        if monitor_status in {"NO_CHANGE", "NO_CONTENT_CHANGE"}:
+            checklist.skip("execution_gate", "محتوای جدیدی برای اعمال وجود ندارد.")
             _record_apply(checklist, None, require_backup=require_backup)
             checklist.success("report", monitor.get("message") or status)
+            status = monitor_status
         elif apply_result:
             checklist.success("execution_gate", f"حالت اجرا: {execution_mode or '-'}")
-            _record_apply(checklist, apply_result, require_backup=require_backup)
+            effective = _record_apply(checklist, apply_result, require_backup=require_backup)
+            if effective:
+                status = effective
         elif execution_mode == "approval":
             checklist.warning("execution_gate", "بسته آماده است و در انتظار تایید اپراتور قرار دارد.")
             _record_apply(checklist, None, require_backup=require_backup)
@@ -200,12 +247,16 @@ def _record_result(
 
     elif command == "apply":
         checklist.success("execution_gate", f"Manifest={payload.get('manifest_id', '-')}")
-        _record_apply(checklist, payload, require_backup=require_backup)
+        effective = _record_apply(checklist, payload, require_backup=require_backup)
+        if effective:
+            status = effective
 
     elif command == "approve":
         checklist.success("execution_gate", "تایید Manifest پذیرفته شد.")
         apply_result = payload.get("apply") if isinstance(payload.get("apply"), dict) else None
-        _record_apply(checklist, apply_result, require_backup=require_backup)
+        effective = _record_apply(checklist, apply_result, require_backup=require_backup)
+        if effective:
+            status = effective
         raw_notifications = payload.get("notifications")
         notifications = (
             [item for item in raw_notifications if isinstance(item, dict)]
@@ -269,8 +320,8 @@ def _record_result(
             "مراحل دارای ❌ یا ⚠️ را بررسی کنید و برای جزئیات فنی به فایل "
             "fgops-YYYY-MM-DD.log در همین پوشه مراجعه کنید."
         )
-    elif status == "NO_CHANGE":
-        operator_action = "اقدامی لازم نیست؛ بسته جدیدی شناسایی نشده است."
+    elif status in {"NO_CHANGE", "NO_CONTENT_CHANGE", "NO_UPDATE"}:
+        operator_action = "اقدامی لازم نیست؛ محتوای جدیدی برای اعمال وجود ندارد."
     return status, operator_action
 
 

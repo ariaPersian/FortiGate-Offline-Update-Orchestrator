@@ -9,7 +9,7 @@ import pytest
 
 from fgops.agent_config import AgentConfig, ExecutionConfig, SourceConfig, StorageConfig
 from fgops.agent_orchestrator import run_agent_once
-from fgops.agent_state import load_state
+from fgops.agent_state import load_state, save_state
 from fgops.downloader import DownloadResult
 
 
@@ -29,9 +29,16 @@ packages:
     return path
 
 
-def _bundle(path: Path, filename: str = "vendor-AV.pkg") -> Path:
+def _bundle(
+    path: Path,
+    filename: str = "vendor-AV.pkg",
+    *,
+    payload: bytes = b"signed-package-placeholder",
+    archive_comment: bytes = b"",
+) -> Path:
     with zipfile.ZipFile(path, "w") as archive:
-        archive.writestr(filename, b"signed-package-placeholder")
+        archive.writestr(filename, payload)
+        archive.comment = archive_comment
     return path
 
 
@@ -90,6 +97,7 @@ def test_prepares_new_bundle_then_reports_no_change(tmp_path: Path) -> None:
     )
     assert first.status == "PREPARED"
     assert first.planned_packages == ("AV",)
+    assert first.payload_sha256 is not None
     assert (Path(first.work_dir) / "manifest.json").is_file()
     assert (Path(first.work_dir) / "agent-plan.json").is_file()
 
@@ -102,6 +110,76 @@ def test_prepares_new_bundle_then_reports_no_change(tmp_path: Path) -> None:
     assert second.status == "NO_CHANGE"
     state = load_state(config.storage.state_file)
     assert state.last_result == "NO_CHANGE"
+
+
+def test_new_zip_with_identical_enabled_packages_skips_device_path(tmp_path: Path) -> None:
+    first_source = _bundle(tmp_path / "first.zip", archive_comment=b"publisher-build-one")
+    second_source = _bundle(tmp_path / "second.zip", archive_comment=b"publisher-build-two")
+    assert hashlib.sha256(first_source.read_bytes()).hexdigest() != hashlib.sha256(
+        second_source.read_bytes()
+    ).hexdigest()
+
+    config = _config(tmp_path)
+    first = run_agent_once(
+        config,
+        dry_run=True,
+        page_fetcher=_fake_fetch,
+        bundle_downloader=_downloader_for(first_source),
+    )
+    assert first.status == "PREPARED"
+    assert first.archive_sha256 is not None
+    assert first.payload_sha256 is not None
+
+    state = load_state(config.storage.state_file)
+    state.archives[first.archive_sha256]["status"] = "APPLIED"
+    state.archives[first.archive_sha256]["apply_status"] = "SUCCESS"
+    save_state(config.storage.state_file, state)
+
+    second = run_agent_once(
+        config,
+        dry_run=False,
+        page_fetcher=_fake_fetch,
+        bundle_downloader=_downloader_for(second_source),
+    )
+
+    assert second.status == "NO_CONTENT_CHANGE"
+    assert second.payload_sha256 == first.payload_sha256
+    assert second.work_dir is None
+    assert "SSH, backup, TFTP, and restore were skipped" in second.message
+
+    updated = load_state(config.storage.state_file)
+    assert second.archive_sha256 is not None
+    duplicate = updated.archives[second.archive_sha256]
+    assert duplicate["status"] == "CONTENT_DUPLICATE"
+    assert duplicate["duplicate_of_archive_sha256"] == first.archive_sha256
+    assert duplicate["payload_sha256"] == first.payload_sha256
+    assert updated.last_result == "NO_CONTENT_CHANGE"
+
+
+def test_changed_enabled_package_payload_is_prepared(tmp_path: Path) -> None:
+    first_source = _bundle(tmp_path / "first.zip", payload=b"package-version-one")
+    second_source = _bundle(tmp_path / "second.zip", payload=b"package-version-two")
+    config = _config(tmp_path)
+
+    first = run_agent_once(
+        config,
+        dry_run=True,
+        page_fetcher=_fake_fetch,
+        bundle_downloader=_downloader_for(first_source),
+    )
+    assert first.archive_sha256 is not None
+    state = load_state(config.storage.state_file)
+    state.archives[first.archive_sha256]["status"] = "APPLIED"
+    save_state(config.storage.state_file, state)
+
+    second = run_agent_once(
+        config,
+        dry_run=True,
+        page_fetcher=_fake_fetch,
+        bundle_downloader=_downloader_for(second_source),
+    )
+    assert second.status == "PREPARED"
+    assert second.payload_sha256 != first.payload_sha256
 
 
 def test_unknown_package_fails_closed(tmp_path: Path) -> None:

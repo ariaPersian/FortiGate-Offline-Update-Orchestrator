@@ -17,6 +17,7 @@ _MARKERS = {
     "TODO": "⬜",
     "RUNNING": "🔄",
     "SUCCESS": "✅",
+    "INFO": "ℹ️",
     "WARNING": "⚠️",
     "FAILED": "❌",
     "SKIPPED": "⏭️",
@@ -154,6 +155,20 @@ class OperatorChecklist:
             return
         self.steps.append(OperatorStep(key, label))
         self._emit(f"  {_MARKERS['TODO']} [جدید] {label}")
+
+    def detail(
+        self,
+        state: str,
+        label: str,
+        detail: object | None = None,
+    ) -> None:
+        """Write an unnumbered child detail without changing the main checklist length."""
+
+        normalized = state.upper()
+        marker = _MARKERS.get(normalized, _MARKERS["INFO"])
+        cleaned = self._clean_detail(detail)
+        suffix = f" — {cleaned}" if cleaned else ""
+        self._emit(f"    {marker} {label}{suffix}")
 
     def begin(self, key: str, detail: object | None = None) -> None:
         self._set(key, "RUNNING", detail)
