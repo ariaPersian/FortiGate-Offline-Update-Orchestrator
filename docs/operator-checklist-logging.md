@@ -1,6 +1,6 @@
 # Operator checklist logging
 
-FGOps v0.5.6 writes a separate daily UTF-8 journal for operators who do not need to interpret structured JSON events or Python tracebacks.
+FGOps v0.5.8 writes a separate daily UTF-8 journal for operators who do not need to interpret structured JSON events or Python tracebacks.
 
 The operator journal supplements the technical runtime log, apply reports, preflight evidence, manifests, lifecycle state, and encrypted backups. It does not replace them.
 
@@ -125,6 +125,8 @@ Get-Content $OperatorLog -Tail 150
 | Final marker/result | Meaning | Required action |
 |---|---|---|
 | `✅ NO_CHANGE` | Source checked; no new archive | None |
+| `✅ NO_CONTENT_CHANGE` | ZIP bytes changed, but the enabled payload was already applied | None; device-changing steps were skipped |
+| `✅ NO_UPDATE` | Controlled apply confirmed every enabled package was already current | None; do not repeat the apply |
 | `✅ SUCCESS` | Apply and verification completed | Retain reports and continue monitoring |
 | `⚠️ SUCCESS_WITH_WARNING` | Safe completion with package or FortiOS warning | Review warning rows and report |
 | `⚠️ PREPARED` | Package is waiting for explicit approval | Follow the approval procedure |
@@ -186,9 +188,15 @@ $Today = Get-Date -Format "yyyy-MM-dd"
 Get-Content "C:\ProgramData\FGOps\logs\fgops-$Today.log" -Tail 200
 ```
 
+## Source retry visibility
+
+A recovered transient page-fetch or bundle-download failure can finish with a normal successful operator result. Retry details are written as `source.retrying` events in the technical journal. A retry warning does not authorize a manual second run and does not indicate that SSH, backup, TFTP, or restore has started.
+
+If the operator run finishes with `❌`, use the run time and command to locate the matching technical `command.failed` event. See [Source bundle ingestion](source-bundle-ingestion.md) for the connectivity and inventory decision table.
+
 ## Missing operator log after upgrade
 
-The operator journal is created by the installed `fgops-agent` console entry point. If the technical log exists but `fgops-operator-YYYY-MM-DD.log` is not created after upgrading to v0.5.6, reinstall the local package:
+The operator journal is created by the installed `fgops-agent` console entry point. If the technical log exists but `fgops-operator-YYYY-MM-DD.log` is not created after upgrading, reinstall the local package. The current expected version is `0.5.8`:
 
 ```powershell
 Disable-ScheduledTask -TaskName "FGOps Offline Update Monitor"

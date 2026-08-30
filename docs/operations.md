@@ -1,6 +1,6 @@
 # Production operations
 
-This runbook covers routine operation of FGOps v0.5.6 on a Windows VM after installation and initial validation.
+This runbook covers routine operation of FGOps v0.5.8 on a Windows VM after installation and initial validation.
 
 The authoritative source repository is:
 
@@ -17,6 +17,7 @@ Scheduled Task every configured interval
   -> fgops-agent cycle
   -> operator ToDo checklist and technical JSON journal append
   -> NO_CHANGE when the downloaded SHA-256 is already processed
+  -> NO_CONTENT_CHANGE when new ZIP bytes contain an already-applied enabled payload
   -> PREPARED when new archive bytes are discovered
   -> approval wait or policy-controlled apply
   -> mandatory preflight and encrypted backup when apply runs
@@ -151,7 +152,7 @@ Get-ChildItem C:\ProgramData\FGOps -Recurse -File |
 ## Weekly checks
 
 - Confirm the checkout remote still points to the private repository.
-- Confirm the installed package version is `0.5.6` or the currently reviewed release.
+- Confirm the installed package version is `0.5.8` or the currently reviewed release.
 - Review the previous seven operator journals for repeated warnings or failures.
 - Confirm every scheduled run has a final operator result; investigate incomplete `🔄` runs.
 - Review the related technical logs for repeated exceptions or notification failures.
@@ -181,6 +182,28 @@ Operator view:
 - prepare/apply-only steps: `⏭️`;
 - final result: `✅ NO_CHANGE`;
 - suggested action: no action required.
+
+### `NO_CONTENT_CHANGE`
+
+The ZIP archive SHA-256 changed, but the enabled package-kind/SHA-256 payload exactly matches a previously applied payload. The archive is recorded as `CONTENT_DUPLICATE`; no SSH connection, backup, TFTP endpoint, or restore is performed.
+
+Operator view:
+
+- source and payload comparison: `✅`;
+- device-changing steps: `⏭️`;
+- final result: `✅ NO_CONTENT_CHANGE`;
+- suggested action: no apply is required; retain normal audit state.
+
+### `NO_UPDATE`
+
+Controlled apply completed, but every enabled package was already current. The technical apply report retains the package-level evidence; the operator view classifies the run as an informational no-op.
+
+Operator view:
+
+- backup and controlled transfer path: completed;
+- package details: `ℹ️ SKIPPED_NO_UPDATE`;
+- final result: `✅ NO_UPDATE`;
+- suggested action: no repeat apply is required.
 
 ### `PREPARED`
 
@@ -309,11 +332,47 @@ git pull --ff-only
 & C:\FGOps\venv\Scripts\python.exe -m pip show fgops
 ```
 
-The forced local reinstall is important for v0.5.6 because the installed `fgops-agent` console entry point now starts the operator checklist wrapper.
+The forced local reinstall prevents older installed modules or an older generated `fgops-agent.exe` from surviving a source-only pull. Confirm that `pip show fgops` reports `0.5.8`.
 
-Validate the entry point:
+The production package map normally lives outside Git. Back it up and compare it with the reviewed v0.5.8 map:
 
 ```powershell
+$RuntimeMap = "C:\ProgramData\FGOps\fortios64-package-map.yml"
+$ReviewedMap = "C:\FGOps\config\fortios64-package-map.yml"
+
+Copy-Item $RuntimeMap "$RuntimeMap.pre-v0.5.8.bak" -ErrorAction Stop
+Compare-Object `
+  (Get-Content $RuntimeMap) `
+  (Get-Content $ReviewedMap)
+```
+
+If the runtime map has no approved local customizations, replace it with the reviewed map. Otherwise merge and review the exact legacy `64...` `IGNORED` rule without discarding local policy:
+
+```powershell
+Copy-Item $ReviewedMap $RuntimeMap -Force
+```
+
+Keep `execution.reject_unknown_packages: true`. Add the bounded retry settings when they are absent:
+
+```yaml
+source:
+  retry_attempts: 3
+  retry_backoff_seconds: 2
+```
+
+Validate the installed package, configuration, and source-only preparation path:
+
+```powershell
+& C:\FGOps\venv\Scripts\python.exe -m pip show fgops
+
+& C:\FGOps\venv\Scripts\fgops-agent.exe `
+  --config C:\ProgramData\FGOps\config.yml `
+  validate-config
+
+& C:\FGOps\venv\Scripts\fgops-agent.exe `
+  --config C:\ProgramData\FGOps\config.yml `
+  run --dry-run
+
 & C:\FGOps\venv\Scripts\fgops-agent.exe `
   --config C:\ProgramData\FGOps\config.yml `
   status
@@ -324,7 +383,9 @@ Get-Item `
   "C:\ProgramData\FGOps\logs\fgops-$Today.log"
 ```
 
-If the operator file is missing while the technical file exists, do not re-enable scheduling until the package has been reinstalled and the wrapper is confirmed.
+Do not re-enable scheduling unless the version is `0.5.8`, configuration validation succeeds, both journals exist, the dry run returns `PREPARED`, `NO_CHANGE`, or `NO_CONTENT_CHANGE`, and state has no unresolved `APPLY_FAILED` or `REVIEW_REQUIRED` archive. For `PREPARED`, inspect `manifest.json`: planned kinds must be unique and intended, exact legacy files may be `IGNORED`, and no file may remain `UNKNOWN`.
+
+See [Source bundle ingestion](source-bundle-ingestion.md) for the full upgrade validation and failure decision table.
 
 If fetch reports a forced update or pull reports diverging branches, do not merge or rebase the former public history into production. Follow [Private repository synchronization](private-repository-sync.md), which preserves a safety branch and stash before aligning local `main` to private `origin/main`.
 
@@ -418,7 +479,22 @@ then:
 5. treat unchanged versions as failure, not as `SKIPPED_NO_UPDATE`;
 6. remove FFDB from `execution.enabled_packages` when compatibility cannot be established.
 
-The package may remain visible in `planned_packages` because the manifest inventories the ZIP. It is not restored unless it is also present in `execution.enabled_packages`.
+The package may remain visible in `manifest.json` because the manifest inventories the ZIP. It is absent from `planned_packages` and is not restored unless it is explicitly added to `execution.enabled_packages` and the package map marks it safe for deferred apply.
+
+## Source and inventory troubleshooting
+
+The technical event `source.retrying` means a transient page-fetch or bundle-download failure will be retried automatically. Do not start a second foreground or scheduled run while the current retry budget is active.
+
+When preparation fails:
+
+1. keep the Scheduled Task disabled if the failure repeats;
+2. preserve the technical and operator journals, downloaded ZIP, state file, and quarantine directory;
+3. identify whether the first failure is source connectivity, ZIP filename conflict, enabled-kind ambiguity, or an unknown package;
+4. do not rename a package, delete one candidate, broaden a package-map regex, or disable unknown rejection merely to make the run pass;
+5. correct the source or reviewed package policy, run `validate-config`, and repeat `run --dry-run` in the foreground;
+6. re-enable scheduling only after reviewing a successful preparation-plane result.
+
+These failures happen before pinned SSH, backup, TFTP, or restore. Exact duplicate and classification behavior is documented in [Source bundle ingestion](source-bundle-ingestion.md).
 
 ## Retention and cleanup
 
@@ -454,3 +530,5 @@ Never delete the only known-good encrypted configuration backup during routine c
 - [Controlled apply](controlled-apply.md)
 - [Backup test](backup-test.md)
 - [Private repository synchronization](private-repository-sync.md)
+- [Source bundle ingestion](source-bundle-ingestion.md)
+- [Payload-level deduplication](payload-deduplication.md)

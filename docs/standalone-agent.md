@@ -1,6 +1,6 @@
 # Standalone Windows agent
 
-FGOps v0.5.6 uses a local Windows agent as the primary deployment model for a single FortiGate management target. The authoritative source is the private repository `ariaPersian/FortiGate-Offline-Update-Orchestrator-Private`. GitHub is not required during scheduled production execution.
+FGOps v0.5.8 uses a local Windows agent as the primary deployment model for a single FortiGate management target. The authoritative source is the private repository `ariaPersian/FortiGate-Offline-Update-Orchestrator-Private`. GitHub is not required during scheduled production execution.
 
 ## Runtime flow
 
@@ -11,9 +11,9 @@ Scheduled Task running as SYSTEM
   -> write the operator ToDo checklist
   -> poll configured source page
   -> discover the matching bundle link
-  -> bounded atomic ZIP download
+  -> bounded atomic ZIP download with transient-error retry
   -> SHA-256 duplicate detection
-  -> safe extraction and package inventory
+  -> safe extraction, duplicate verification, and package inventory
   -> immutable local manifest
   -> apply execution policy
   -> load DPAPI-protected secrets when required
@@ -48,7 +48,7 @@ Confirm the installed version:
 & C:\FGOps\venv\Scripts\python.exe -m pip show fgops
 ```
 
-The expected release for this document is `0.5.6`.
+The expected release for this document is `0.5.8`.
 
 ## Existing checkout and private remote
 
@@ -68,7 +68,7 @@ https://github.com/ariaPersian/FortiGate-Offline-Update-Orchestrator-Private.git
 
 If the checkout still points to the former public repository, or `git fetch` reports a forced update and `git pull --ff-only` reports diverging branches, do not merge or rebase the histories into the production checkout. Follow [Private repository synchronization](private-repository-sync.md): preserve a safety branch and stash, change the remote, fetch the private branch, and align local `main` with `origin/main`.
 
-## Upgrade to v0.5.6
+## Upgrade to v0.5.8
 
 Disable scheduling while source and the virtual environment are changed:
 
@@ -86,11 +86,21 @@ git pull --ff-only
 & C:\FGOps\venv\Scripts\python.exe -m pip show fgops
 ```
 
-The reinstall is mandatory for the v0.5.6 logging change because the installed `fgops-agent` console entry point now starts the operator checklist wrapper. A source-only pull can leave an older generated executable entry point in the virtual environment.
+The forced reinstall is mandatory because a source-only pull can leave older installed modules and a generated `fgops-agent.exe` in the virtual environment. Confirm that `pip show fgops` reports `0.5.8`.
 
-Run a harmless foreground validation:
+Version 0.5.8 adds bounded source retries and mixed-generation bundle handling. Add `source.retry_attempts` and `source.retry_backoff_seconds` to the production configuration when absent. Back up the production package map, then compare it with the reviewed repository map; copy it only when no approved local customizations exist, otherwise merge the exact `64...` `IGNORED` rule without discarding local policy. See [Source bundle ingestion](source-bundle-ingestion.md) for the decision rules and validation checklist.
+
+Validate configuration and source preparation in the foreground:
 
 ```powershell
+& C:\FGOps\venv\Scripts\fgops-agent.exe `
+  --config C:\ProgramData\FGOps\config.yml `
+  validate-config
+
+& C:\FGOps\venv\Scripts\fgops-agent.exe `
+  --config C:\ProgramData\FGOps\config.yml `
+  run --dry-run
+
 & C:\FGOps\venv\Scripts\fgops-agent.exe `
   --config C:\ProgramData\FGOps\config.yml `
   status
@@ -105,7 +115,7 @@ Get-Item `
   "C:\ProgramData\FGOps\logs\fgops-$Today.log"
 ```
 
-Do not re-enable the Scheduled Task until the operator journal contains a final `نتیجه نهایی:` line for the validation command.
+Do not re-enable the Scheduled Task until all three commands have a final `نتیجه نهایی:` line, the dry run finishes as `PREPARED`, `NO_CHANGE`, or `NO_CONTENT_CHANGE`, and state contains no unresolved `APPLY_FAILED` or `REVIEW_REQUIRED` archive. If it prepares a new archive, review its manifest warnings and confirm that `planned_packages` contains only the intended enabled families.
 
 ## Initialize runtime storage
 
@@ -140,6 +150,8 @@ C:\ProgramData\FGOps\tftp\
 ```
 
 Archive identity is SHA-256. The agent detects new bytes even if a source reuses the same URL and filename. State records the archive path, manifest ID, work directory, planned package kinds, lifecycle status, apply report, backup path, last result, and last error.
+
+Enabled payload identity is also SHA-256. If the ZIP bytes change but the enabled package payload exactly matches a previously applied payload, the result is `NO_CONTENT_CHANGE`; SSH, backup, TFTP, and restore remain skipped.
 
 State writes are atomic. Do not delete or edit the state file to force reinstallation. A manual recovery reset should be rare, evidence-backed, scoped to one archive hash, and preceded by a backup of the state file.
 
@@ -331,3 +343,5 @@ FFDB is intentionally excluded. Add it only after the exact FFDB package source,
 - [Read-only preflight](read-only-preflight.md)
 - [Backup test](backup-test.md)
 - [Controlled apply](controlled-apply.md)
+- [Source bundle ingestion](source-bundle-ingestion.md)
+- [Payload-level deduplication](payload-deduplication.md)

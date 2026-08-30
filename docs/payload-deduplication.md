@@ -1,6 +1,6 @@
 # Payload-level deduplication
 
-FGOps v0.5.7 separates ZIP archive identity from the identity of the enabled FortiGuard package payload.
+Introduced in v0.5.7 and retained in v0.5.8, payload-level deduplication separates ZIP archive identity from the identity of the enabled FortiGuard package payload.
 
 ## Why archive SHA-256 is not sufficient
 
@@ -22,7 +22,7 @@ MMDB:<package-sha256>
 
 The SHA-256 of this canonical text is stored as `payload_sha256`.
 
-Only package kinds present in `execution.enabled_packages` participate. An excluded package such as FFDB cannot force a live apply merely because its bytes or ZIP metadata changed.
+Only package kinds present in `execution.enabled_packages` participate. An excluded package such as FFDB, an exact `IGNORED` legacy record, or an `UNKNOWN` record cannot force a live apply merely because its bytes or ZIP metadata changed. Preparation must first prove that each participating enabled kind has exactly one candidate.
 
 ## Decision flow
 
@@ -69,6 +69,8 @@ Package results with `SKIPPED_NO_UPDATE` are also informational rather than warn
 - SHA-256 uses Python's `hashlib` implementation.
 - Package hashes are calculated only after safe ZIP extraction.
 - Unknown-package rejection remains unchanged.
+- Exact `IGNORED` mappings remain audit-only and never contribute to approval or payload identity.
+- Duplicate enabled kinds fail before payload identity is calculated; duplicate disabled kinds remain audit warnings.
 - Package allowlisting remains authoritative.
 - A changed enabled package hash still enters the normal preflight, mandatory backup, controlled apply, and version-verification path.
 - Failed or review-required payloads are not treated as successfully applied payloads and are not silently replayed.

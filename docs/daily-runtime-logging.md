@@ -1,6 +1,6 @@
 # Daily runtime logging
 
-FGOps v0.5.6 writes two append-only UTF-8 journals per local calendar day for every installed `fgops-agent` command, including Scheduled Task `cycle` executions.
+FGOps v0.5.8 writes two append-only UTF-8 journals per local calendar day for every installed `fgops-agent` command, including Scheduled Task `cycle` executions.
 
 The two files serve different audiences:
 
@@ -95,6 +95,7 @@ config.validated
 host_key.scanned
 monitor.completed
 cycle.completed
+source.retrying
 preflight.completed
 backup_test.completed
 apply.completed
@@ -107,6 +108,8 @@ notification.test_completed
 ```
 
 `command.failed` includes the error type, message, and traceback. Secret-store events include metadata only and do not intentionally expose plaintext values.
+
+`source.retrying` is written at warning level before a bounded retry of `fetch_source_page` or `download_bundle`. It records the completed attempt, next attempt, maximum attempts, delay, and exception. Its presence alone is not a failed cycle; correlate it with the final `cycle.completed` or `command.failed` event. TLS validation and content-validation failures are not retried. See [Source bundle ingestion](source-bundle-ingestion.md).
 
 ## Relationship between both files
 
@@ -188,13 +191,15 @@ Retention deletion is best effort. A log temporarily locked by an operator, anti
 
 ## Validate the installed logging entry point
 
-The operator journal is implemented by the installed `fgops-agent` console entry point. After upgrading to v0.5.6, reinstall the project into the virtual environment before validation:
+The operator journal is implemented by the installed `fgops-agent` console entry point. After upgrading, reinstall the project into the virtual environment before validation. The current expected version is `0.5.8`:
 
 ```powershell
 Set-Location C:\FGOps
 
 & C:\FGOps\venv\Scripts\python.exe `
   -m pip install --upgrade --force-reinstall --no-deps C:\FGOps
+
+& C:\FGOps\venv\Scripts\python.exe -m pip show fgops
 ```
 
 Run a harmless command:
