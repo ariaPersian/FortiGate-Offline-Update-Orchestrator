@@ -6,7 +6,7 @@
 
 **FGOps** is a policy-driven Windows agent for discovering, preparing, backing up, applying, logging, and auditing offline FortiGuard signature updates on FortiGate appliances that cannot retrieve updates directly from FortiGuard.
 
-> **Current release:** `v0.5.6`  
+> **Current release:** `v0.5.8`
 > **Authoritative repository:** `ariaPersian/FortiGate-Offline-Update-Orchestrator-Private`  
 > **Maturity:** pre-1.0 operational tooling with a validated reference deployment, not a universal compatibility claim.
 
@@ -110,8 +110,12 @@ Other FortiGate models, FortiOS branches, package publishers, database families,
 
 - Configurable source-page monitoring and link matching.
 - Native/system TLS validation, bounded downloads, and atomic file replacement.
+- Bounded retry with exponential backoff for transient source and download failures.
 - SHA-256 archive deduplication even when a publisher reuses the same URL.
 - Safe ZIP extraction and package-kind inventory.
+- SHA-256 deduplication of identical ZIP members and fail-closed handling of conflicts.
+- Audit-only tolerance for duplicate disabled families; enabled families must remain unique.
+- Exact package-map exclusions for publisher-supplied legacy files; all other unknowns still fail closed.
 - Immutable local manifests and atomic lifecycle state.
 - SSH host-key pinning and expected target identity checks.
 - Encrypted `full-config` backup before every controlled apply.
@@ -197,11 +201,11 @@ Confirm the installed version:
 & C:\FGOps\venv\Scripts\python.exe -m pip show fgops
 ```
 
-The expected version for this documentation is `0.5.6`.
+The expected version for this documentation is `0.5.8`.
 
-### Upgrade from v0.5.5
+### Upgrade from v0.5.7
 
-The `fgops-agent` console entry point changed in v0.5.6 so the operator journal can wrap every command. Pulling the source alone is not sufficient; reinstall the package into the existing virtual environment:
+Version `0.5.8` hardens ingestion against the source behavior observed in August 2026: transient HTTP timeouts, repeated identical ZIP members, and an older `64...` package set bundled beside the current `cyberlogic.ir-...` set. The exact legacy names are retained as audit-only `IGNORED` records; arbitrary unknown names and multiple candidates for any enabled family still fail closed. Pulling the source alone is not sufficient; reinstall the package into the existing virtual environment:
 
 ```powershell
 Disable-ScheduledTask -TaskName "FGOps Offline Update Monitor"
@@ -233,6 +237,13 @@ Get-Content "C:\ProgramData\FGOps\logs\fgops-operator-$Today.log" -Tail 50
 The following addresses are documentation-only examples from the TEST-NET ranges and must be replaced locally.
 
 ```yaml
+source:
+  page_url: "https://example.invalid/fortigate-updates/"
+  link_text_regex: '(?i)Fortigate\s+V6\.4'
+  timeout_seconds: 60
+  retry_attempts: 3
+  retry_backoff_seconds: 2
+
 execution:
   # Keep the first reviewed live operation in approval mode. Enable unattended
   # only after backup, restore, version comparison, and postflight evidence pass.

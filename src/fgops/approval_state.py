@@ -261,7 +261,9 @@ def create_approval_record(
     if expires_at <= now:
         raise ValueError("expires_at must be in the future.")
     known_packages = tuple(
-        package for package in manifest.packages if package.kind != PackageKind.UNKNOWN
+        package
+        for package in manifest.packages
+        if package.kind not in {PackageKind.UNKNOWN, PackageKind.IGNORED}
     )
     if not known_packages:
         raise ValueError("Manifest does not contain an approvable package.")

@@ -23,9 +23,11 @@ class SourceConfig:
     link_text_regex: str
     timeout_seconds: int = 60
     max_download_bytes: int = 512 * 1024 * 1024
-    user_agent: str = "FGOps/0.4 (+offline-update-monitor)"
+    user_agent: str = "FGOps/0.5.8 (+offline-update-monitor)"
     tls_mode: str = "system"
     ca_file: Path | None = None
+    retry_attempts: int = 3
+    retry_backoff_seconds: float = 2.0
 
     def validate(self) -> None:
         parsed = urlparse(self.page_url)
@@ -34,6 +36,10 @@ class SourceConfig:
         re.compile(self.link_text_regex)
         if not 5 <= self.timeout_seconds <= 600:
             raise ValueError("source.timeout_seconds must be between 5 and 600.")
+        if not 1 <= self.retry_attempts <= 5:
+            raise ValueError("source.retry_attempts must be between 1 and 5.")
+        if not 0 <= self.retry_backoff_seconds <= 60:
+            raise ValueError("source.retry_backoff_seconds must be between 0 and 60.")
         if not 1024 * 1024 <= self.max_download_bytes <= 4 * 1024**3:
             raise ValueError("source.max_download_bytes must be between 1 MiB and 4 GiB.")
         if self.tls_mode not in {"system", "python", "custom"}:
@@ -165,7 +171,7 @@ class ApplyConfig:
         forbidden = set(self.package_order) - set(_DEFAULT_PACKAGE_ORDER)
         if forbidden:
             raise ValueError(
-                "apply.package_order contains packages not enabled for controlled v0.4 apply: "
+                "apply.package_order contains unsupported package kinds: "
                 + ", ".join(sorted(forbidden))
             )
 
@@ -228,8 +234,10 @@ def load_agent_config(path: Path) -> AgentConfig:
         page_url=str(source_raw.get("page_url", _DEFAULT_SOURCE_URL)),
         link_text_regex=str(source_raw.get("link_text_regex", r"(?i)Fortigate\s+V6\.4")),
         timeout_seconds=int(source_raw.get("timeout_seconds", 60)),
+        retry_attempts=int(source_raw.get("retry_attempts", 3)),
+        retry_backoff_seconds=float(source_raw.get("retry_backoff_seconds", 2.0)),
         max_download_bytes=int(source_raw.get("max_download_bytes", 512 * 1024 * 1024)),
-        user_agent=str(source_raw.get("user_agent", "FGOps/0.4 (+offline-update-monitor)")),
+        user_agent=str(source_raw.get("user_agent", "FGOps/0.5.8 (+offline-update-monitor)")),
         tls_mode=str(source_raw.get("tls_mode", "system")).strip().lower(),
         ca_file=_resolve(base, ca_value) if ca_value else None,
     )
@@ -321,6 +329,8 @@ source:
   page_url: "{_DEFAULT_SOURCE_URL}"
   link_text_regex: '(?i)Fortigate\\s+V6\\.4'
   timeout_seconds: 60
+  retry_attempts: 3
+  retry_backoff_seconds: 2
   max_download_bytes: 536870912
   tls_mode: system
 

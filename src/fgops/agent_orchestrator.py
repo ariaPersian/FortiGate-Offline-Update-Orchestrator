@@ -2,10 +2,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import shutil
+import ssl
+import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+from typing import TypeVar
+from urllib.error import URLError
 
 from .agent_config import AgentConfig
 from .agent_state import load_state, save_state, utc_now
@@ -13,6 +18,8 @@ from .downloader import DownloadResult, download_bundle
 from .inventory import build_manifest
 from .source_monitor import DiscoveredLink, discover_download_link, fetch_page
 from .tls import build_tls_context
+
+_T = TypeVar("_T")
 
 
 @dataclass(frozen=True)
@@ -47,6 +54,55 @@ PageFetcher = Callable[..., str]
 BundleDownloader = Callable[..., DownloadResult]
 
 
+def _is_transient_source_error(exc: BaseException) -> bool:
+    if isinstance(exc, ssl.SSLError):
+        return False
+    if isinstance(exc, (TimeoutError, ConnectionError)):
+        return True
+    if not isinstance(exc, URLError):
+        return False
+    reason = exc.reason
+    return not isinstance(reason, ssl.SSLError) and isinstance(
+        reason,
+        (TimeoutError, ConnectionError, OSError),
+    )
+
+
+def _retry_source_operation(
+    operation: Callable[[], _T],
+    *,
+    operation_name: str,
+    attempts: int,
+    backoff_seconds: float,
+    sleeper: Callable[[float], None],
+) -> _T:
+    for attempt in range(1, attempts + 1):
+        try:
+            return operation()
+        except Exception as exc:
+            if attempt >= attempts or not _is_transient_source_error(exc):
+                raise
+            delay = backoff_seconds * (2 ** (attempt - 1))
+            logging.getLogger("fgops").warning(
+                json.dumps(
+                    {
+                        "event": "source.retrying",
+                        "operation": operation_name,
+                        "attempt": attempt,
+                        "next_attempt": attempt + 1,
+                        "max_attempts": attempts,
+                        "delay_seconds": delay,
+                        "error_type": type(exc).__name__,
+                        "error": str(exc),
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
+            )
+            sleeper(delay)
+    raise AssertionError("unreachable")
+
+
 def _write_json(path: Path, value: dict[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(value, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
@@ -59,7 +115,11 @@ def _payload_sha256(packages: list[dict[str, object]], payload_kinds: set[str]) 
         package_hash = str(item.get("sha256") or "")
         if kind in payload_kinds and package_hash:
             selected.append((kind, package_hash))
-    if not selected or {kind for kind, _package_hash in selected} != payload_kinds:
+    if (
+        not selected
+        or {kind for kind, _package_hash in selected} != payload_kinds
+        or len(selected) != len(payload_kinds)
+    ):
         return None
     material = "\n".join(f"{kind}:{package_hash}" for kind, package_hash in sorted(selected))
     return hashlib.sha256(material.encode("utf-8")).hexdigest()
@@ -118,6 +178,7 @@ def run_agent_once(
     dry_run: bool = False,
     page_fetcher: PageFetcher = fetch_page,
     bundle_downloader: BundleDownloader = download_bundle,
+    retry_sleeper: Callable[[float], None] = time.sleep,
 ) -> AgentRunResult:
     config.storage.create_directories()
     state = load_state(config.storage.state_file)
@@ -126,24 +187,36 @@ def run_agent_once(
 
     try:
         ssl_context = build_tls_context(config.source.tls_mode, config.source.ca_file)
-        page_html = page_fetcher(
-            config.source.page_url,
-            timeout_seconds=config.source.timeout_seconds,
-            user_agent=config.source.user_agent,
-            ssl_context=ssl_context,
+        page_html = _retry_source_operation(
+            lambda: page_fetcher(
+                config.source.page_url,
+                timeout_seconds=config.source.timeout_seconds,
+                user_agent=config.source.user_agent,
+                ssl_context=ssl_context,
+            ),
+            operation_name="fetch_source_page",
+            attempts=config.source.retry_attempts,
+            backoff_seconds=config.source.retry_backoff_seconds,
+            sleeper=retry_sleeper,
         )
         discovered: DiscoveredLink = discover_download_link(
             page_html,
             config.source.page_url,
             config.source.link_text_regex,
         )
-        downloaded = bundle_downloader(
-            discovered.url,
-            config.storage.incoming,
-            timeout_seconds=config.source.timeout_seconds,
-            max_download_bytes=config.source.max_download_bytes,
-            user_agent=config.source.user_agent,
-            ssl_context=ssl_context,
+        downloaded = _retry_source_operation(
+            lambda: bundle_downloader(
+                discovered.url,
+                config.storage.incoming,
+                timeout_seconds=config.source.timeout_seconds,
+                max_download_bytes=config.source.max_download_bytes,
+                user_agent=config.source.user_agent,
+                ssl_context=ssl_context,
+            ),
+            operation_name="download_bundle",
+            attempts=config.source.retry_attempts,
+            backoff_seconds=config.source.retry_backoff_seconds,
+            sleeper=retry_sleeper,
         )
 
         if state.has_successful_archive(downloaded.sha256):
@@ -195,7 +268,12 @@ def run_agent_once(
             )
 
         work_dir = config.storage.quarantine / downloaded.sha256[:16]
-        manifest = build_manifest(downloaded.path, work_dir, config.package_map)
+        manifest = build_manifest(
+            downloaded.path,
+            work_dir,
+            config.package_map,
+            required_unique_kinds=config.execution.enabled_packages,
+        )
         unknown = [item.filename for item in manifest.packages if item.kind.value == "UNKNOWN"]
         if unknown and config.execution.reject_unknown_packages:
             raise ValueError(f"Unknown package types were found: {', '.join(unknown)}")

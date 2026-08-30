@@ -1,9 +1,10 @@
-from datetime import datetime, timedelta, timezone
-from pathlib import Path
 import zipfile
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 
+import fgops
 from fgops.approval import ApprovalPolicy, evaluate_policy, parse_approval_command
 from fgops.fortios import classify_outcome, parse_autoupdate_versions, render_restore_command
 from fgops.inventory import build_manifest, safe_extract_packages
@@ -15,7 +16,6 @@ from fgops.models import (
     RestoreFamily,
     UpdateStatus,
 )
-
 
 BEFORE = """Virus Definitions
 ---------
@@ -42,6 +42,10 @@ Version: 7.04473
 Last Updated using manual update on Sun Jul 26 08:57:34 2026
 Result: Connectivity failure
 """
+
+
+def test_runtime_version_matches_release() -> None:
+    assert fgops.__version__ == "0.5.8"
 
 
 def _manifest() -> BundleManifest:
@@ -92,7 +96,7 @@ def test_grace_period_only_approves_safe_packages() -> None:
         grace_period=timedelta(hours=24),
         safe_package_kinds=(PackageKind.AV, PackageKind.ISDB),
     )
-    created = datetime(2026, 7, 25, tzinfo=timezone.utc)
+    created = datetime(2026, 7, 25, tzinfo=UTC)
     decision = evaluate_policy(_manifest(), policy, created, created + timedelta(hours=25))
     assert decision.state == ApprovalState.APPROVED
     assert decision.eligible_packages == (PackageKind.AV,)
@@ -146,3 +150,87 @@ def test_zip_traversal_is_rejected(tmp_path: Path) -> None:
         bundle.writestr("../escape.pkg", b"no")
     with pytest.raises(ValueError, match="Unsafe archive path"):
         safe_extract_packages(archive, tmp_path / "out")
+
+
+def test_identical_flattened_filenames_are_deduplicated_by_hash(tmp_path: Path) -> None:
+    archive = tmp_path / "duplicate.zip"
+    with zipfile.ZipFile(archive, "w") as bundle:
+        bundle.writestr("first/64Antivirus.pkg", b"same-package")
+        bundle.writestr("second/64Antivirus.pkg", b"same-package")
+    warnings: list[str] = []
+
+    packages = safe_extract_packages(archive, tmp_path / "out", warnings=warnings)
+
+    assert [package.name for package in packages] == ["64Antivirus.pkg"]
+    assert packages[0].read_bytes() == b"same-package"
+    assert any("identical duplicate" in warning for warning in warnings)
+
+
+def test_conflicting_flattened_filenames_fail_closed(tmp_path: Path) -> None:
+    archive = tmp_path / "conflict.zip"
+    with zipfile.ZipFile(archive, "w") as bundle:
+        bundle.writestr("first/64Antivirus.pkg", b"package-one")
+        bundle.writestr("second/64Antivirus.pkg", b"package-two")
+
+    with pytest.raises(ValueError, match="Conflicting package files"):
+        safe_extract_packages(archive, tmp_path / "out")
+
+
+def test_duplicate_disabled_kind_is_audited_but_does_not_block(tmp_path: Path) -> None:
+    archive = tmp_path / "disabled-duplicates.zip"
+    with zipfile.ZipFile(archive, "w") as bundle:
+        bundle.writestr("vendor-AV.pkg", b"av")
+        bundle.writestr("first-Botnet-Domain.pkg", b"botnet-one")
+        bundle.writestr("second-Botnet-Domain.pkg", b"botnet-two")
+    package_map = Path(__file__).parents[1] / "config" / "fortios64-package-map.yml"
+
+    manifest = build_manifest(
+        archive,
+        tmp_path / "out",
+        package_map,
+        required_unique_kinds={"AV"},
+    )
+
+    assert [item.kind for item in manifest.packages].count(PackageKind.BOTNET) == 2
+    assert any("disabled kind BOTNET" in warning for warning in manifest.warnings)
+
+
+def test_duplicate_enabled_kind_remains_fail_closed(tmp_path: Path) -> None:
+    archive = tmp_path / "enabled-duplicates.zip"
+    with zipfile.ZipFile(archive, "w") as bundle:
+        bundle.writestr("first-AV.pkg", b"av-one")
+        bundle.writestr("second-AV.pkg", b"av-two")
+    package_map = Path(__file__).parents[1] / "config" / "fortios64-package-map.yml"
+
+    with pytest.raises(ValueError, match="Enabled package kind AV is ambiguous"):
+        build_manifest(
+            archive,
+            tmp_path / "out",
+            package_map,
+            required_unique_kinds={"AV"},
+        )
+
+
+def test_exact_legacy_64_package_names_are_audit_only(tmp_path: Path) -> None:
+    archive = tmp_path / "mixed-generation.zip"
+    with zipfile.ZipFile(archive, "w") as bundle:
+        bundle.writestr("v6.4/64Antivirus.pkg", b"older-av")
+        bundle.writestr("v6.4/64Botnet-Domain.pkg", b"older-botnet")
+        bundle.writestr("v6.4/cyberlogic.ir-AV.pkg", b"current-av")
+        bundle.writestr("v6.4/cyberlogic.ir-Botnet-Domain.pkg", b"current-botnet")
+    package_map = Path(__file__).parents[1] / "config" / "fortios64-package-map.yml"
+
+    manifest = build_manifest(
+        archive,
+        tmp_path / "out",
+        package_map,
+        required_unique_kinds={"AV"},
+    )
+
+    kinds = {item.filename: item.kind for item in manifest.packages}
+    assert kinds["64Antivirus.pkg"] == PackageKind.IGNORED
+    assert kinds["64Botnet-Domain.pkg"] == PackageKind.IGNORED
+    assert kinds["cyberlogic.ir-AV.pkg"] == PackageKind.AV
+    assert kinds["cyberlogic.ir-Botnet-Domain.pkg"] == PackageKind.BOTNET
+    assert PackageKind.UNKNOWN not in kinds.values()
+    assert sum("audit" in warning for warning in manifest.warnings) == 2

@@ -14,6 +14,7 @@ class PackageKind(StrEnum):
     MMDB = "MMDB"
     ISDB = "ISDB"
     BOTNET = "BOTNET"
+    IGNORED = "IGNORED"
     UNKNOWN = "UNKNOWN"
 
 
