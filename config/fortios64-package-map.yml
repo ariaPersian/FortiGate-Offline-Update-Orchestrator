@@ -41,8 +41,15 @@ packages:
     safe_for_deferred_apply: false
     expected_objects: [Industrial Attack Definitions]
 
-  - pattern: '(?i)Botnet-Domain\.pkg$'
+  - pattern: '(?i)(^|[-_.])Botnet-Domain\.pkg$'
     kind: BOTNET
     restore_family: other-objects
     safe_for_deferred_apply: false
     expected_objects: [Botnet Domain Database]
+
+  # The publisher began bundling an older, parallel 64-prefixed package set
+  # beside the current cyberlogic.ir-* files in August 2026. Keep these exact
+  # names in the manifest for audit, but never select or restore them.
+  - pattern: '(?i)^64(?:Antivirus|Application-Control|Botnet-Domain|Industrial-DB|Internet-Service|IPS|MCDB|Mobile-Malware)\.pkg$'
+    kind: IGNORED
+    safe_for_deferred_apply: false

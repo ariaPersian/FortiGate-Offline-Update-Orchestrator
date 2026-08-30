@@ -4,6 +4,7 @@ import hashlib
 import shutil
 import zipfile
 from pathlib import Path
+from urllib.error import URLError
 
 import pytest
 
@@ -22,6 +23,11 @@ packages:
     restore_family: av
     safe_for_deferred_apply: true
     expected_objects: [Virus Definitions]
+  - pattern: '(?i)Botnet-Domain\\.pkg$'
+    kind: BOTNET
+    restore_family: other-objects
+    safe_for_deferred_apply: false
+    expected_objects: [Botnet Domain Database]
 """.strip()
         + "\n",
         encoding="utf-8",
@@ -195,3 +201,50 @@ def test_unknown_package_fails_closed(tmp_path: Path) -> None:
         )
     state = load_state(config.storage.state_file)
     assert state.last_result == "FAILED"
+
+
+def test_duplicate_disabled_kind_does_not_block_enabled_payload(tmp_path: Path) -> None:
+    source = tmp_path / "source.zip"
+    with zipfile.ZipFile(source, "w") as archive:
+        archive.writestr("vendor-AV.pkg", b"av")
+        archive.writestr("first-Botnet-Domain.pkg", b"botnet-one")
+        archive.writestr("second-Botnet-Domain.pkg", b"botnet-two")
+    config = _config(tmp_path)
+
+    result = run_agent_once(
+        config,
+        dry_run=True,
+        page_fetcher=_fake_fetch,
+        bundle_downloader=_downloader_for(source),
+    )
+
+    assert result.status == "PREPARED"
+    assert result.planned_packages == ("AV",)
+    manifest = Path(result.work_dir) / "manifest.json"
+    assert "disabled kind BOTNET" in manifest.read_text(encoding="utf-8")
+
+
+def test_transient_source_timeout_is_retried(tmp_path: Path) -> None:
+    source = _bundle(tmp_path / "source.zip")
+    config = _config(tmp_path)
+    attempts = 0
+    delays: list[float] = []
+
+    def flaky_fetch(*args, **kwargs) -> str:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise URLError(TimeoutError("timed out"))
+        return _fake_fetch(*args, **kwargs)
+
+    result = run_agent_once(
+        config,
+        dry_run=True,
+        page_fetcher=flaky_fetch,
+        bundle_downloader=_downloader_for(source),
+        retry_sleeper=delays.append,
+    )
+
+    assert result.status == "PREPARED"
+    assert attempts == 2
+    assert delays == [2.0]

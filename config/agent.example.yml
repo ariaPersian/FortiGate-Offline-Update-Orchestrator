@@ -7,6 +7,8 @@ source:
   page_url: "https://www.cyberlogic.ir/%D8%A8%D8%B1%D9%88%D8%B2-%D8%B1%D8%B3%D8%A7%D9%86%DB%8C-%D8%A2%D9%81%D9%84%D8%A7%DB%8C%D9%86-fortigate-%D9%88-fortiweb/"
   link_text_regex: '(?i)Fortigate\s+V6\.4'
   timeout_seconds: 60
+  retry_attempts: 3
+  retry_backoff_seconds: 2
   max_download_bytes: 536870912
   tls_mode: system
 

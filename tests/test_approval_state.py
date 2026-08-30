@@ -48,6 +48,14 @@ def _manifest() -> BundleManifest:
                 expected_objects=("Industrial Attack Definitions",),
                 safe_for_deferred_apply=False,
             ),
+            PackageRecord(
+                filename="64Antivirus.pkg",
+                size=30,
+                sha256="d" * 64,
+                kind=PackageKind.IGNORED,
+                restore_family=None,
+                safe_for_deferred_apply=False,
+            ),
         ),
     )
 

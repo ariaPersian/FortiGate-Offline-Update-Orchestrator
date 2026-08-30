@@ -349,6 +349,15 @@ def run_controlled_apply(
     selected.sort(key=lambda item: order.get(str(item.get("kind")), 999))
     if not selected:
         raise ValueError("No safe enabled packages were selected for controlled apply.")
+    selected_kinds = [str(item.get("kind")) for item in selected]
+    ambiguous_kinds = sorted(
+        kind for kind in set(selected_kinds) if selected_kinds.count(kind) > 1
+    )
+    if ambiguous_kinds:
+        raise ValueError(
+            "Prepared manifest contains more than one enabled package for: "
+            + ", ".join(ambiguous_kinds)
+        )
 
     packages_dir = work_dir / "packages"
     for item in selected:
