@@ -2,49 +2,50 @@
 
 FGOps v0.5.8 writes two append-only UTF-8 journals per local calendar day for every installed `fgops-agent` command, including Scheduled Task `cycle` executions.
 
-The two files serve different audiences:
+The operator-health update adds a separate timestamped health-report layer. The three evidence views serve different purposes:
 
-| File | Audience | Primary purpose |
+| Artifact | Audience | Primary purpose |
 |---|---|---|
-| `fgops-operator-YYYY-MM-DD.log` | Operations staff | Human-readable ToDo checklist, step results, final status, exit code, and suggested action |
+| `fgops-health-*.txt/.json` | Operator / support | Consolidated current health across checkout, runtime, Task, state, evidence, and read-only FortiGate checks |
+| `fgops-operator-YYYY-MM-DD.log` | Operations staff | Human-readable per-run ToDo checklist, step results, final status, exit code, and suggested action |
 | `fgops-YYYY-MM-DD.log` | Technical support | Structured JSON events, complete result payloads, exceptions, and tracebacks |
 
-The journals supplement immutable manifests, lifecycle state, JSON/TXT evidence, apply reports, and encrypted backups. They do not replace those artifacts.
+The health report is a snapshot generated on demand. The journals are append-only execution histories. Neither replaces immutable manifests, lifecycle state, apply reports, preflight evidence, encrypted backups, or FortiGate version evidence.
+
+See [Operator health report](operator-health-report.md) for the health-check contract and [Operator checklist logging](operator-checklist-logging.md) for the operator procedure.
 
 ## Location and naming
 
-The default location is derived from the configured runtime storage root:
+Daily journals:
 
 ```text
 C:\ProgramData\FGOps\logs\fgops-operator-YYYY-MM-DD.log
 C:\ProgramData\FGOps\logs\fgops-YYYY-MM-DD.log
 ```
 
-Examples:
+On-demand health reports:
 
 ```text
-C:\ProgramData\FGOps\logs\fgops-operator-2026-07-28.log
-C:\ProgramData\FGOps\logs\fgops-2026-07-28.log
+C:\ProgramData\FGOps\reports\health\fgops-health-YYYYMMDD-HHMMSS.txt
+C:\ProgramData\FGOps\reports\health\fgops-health-YYYYMMDD-HHMMSS.json
 ```
 
-Logging starts before the complete YAML configuration is loaded. With the normal configuration location `C:\ProgramData\FGOps\config.yml`, early configuration failures are captured under the same runtime root.
+Logging starts before the complete YAML configuration is loaded. With the normal configuration path `C:\ProgramData\FGOps\config.yml`, early configuration failures are captured under the same runtime root.
 
-When `storage.root` points elsewhere, both loggers relocate to `<storage.root>\logs` after configuration loads successfully. The operator journal records the relocation as a readable step message, while the technical journal records the corresponding structured event.
+When `storage.root` points elsewhere, both runtime loggers relocate to `<storage.root>\logs` after configuration loads successfully.
 
-Both handlers check the local date for every emitted record. A command that crosses midnight continues in the new day's files without requiring a service restart.
+Both handlers check the local date for every emitted record. A command that crosses midnight continues in the new day's files without requiring a restart.
 
 ## Operator journal
 
-The operator journal is the first file a non-technical operator should inspect.
-
-At the start of each run, FGOps writes:
+At the start of each `fgops-agent` run, the operator journal writes:
 
 - the command name;
 - a unique run identifier;
 - the complete planned ToDo list;
 - one `⬜` row for every planned step.
 
-As execution proceeds, each row is updated through additional log lines:
+As execution proceeds, each step is recorded with a fixed status symbol:
 
 | Symbol | State | Interpretation |
 |---|---|---|
@@ -55,16 +56,14 @@ As execution proceeds, each row is updated through additional log lines:
 | `❌` | Failed | Failed or blocked by a mandatory gate |
 | `⏭️` | Skipped | Safely not required for this execution path |
 
-The end of every completed run contains:
+The end of every normally completed run contains:
 
-- a final summary of all steps;
+- a summary of the run steps;
 - the overall result;
 - the process exit code;
 - an operator action when review, approval, or troubleshooting is required.
 
-Controlled apply and approval runs add one row per package result. This lets the operator distinguish, for example, a successful AV update from an already-current MMDB package or a failed IPS activation.
-
-See [Operator checklist logging](operator-checklist-logging.md) for examples and the response procedure.
+Controlled apply and approval runs add one row per package result.
 
 ## Technical journal format
 
@@ -81,8 +80,6 @@ Example:
 2026-07-28T12:45:11+04:00 INFO pid=4216 {"command":"cycle","event":"cycle.completed","exit_code":0,"result":{"status":"NO_CHANGE"}}
 2026-07-28T12:45:11+04:00 INFO pid=4216 {"command":"cycle","event":"command.completed","exit_code":0}
 ```
-
-The structured result can contain archive SHA-256 values, manifest IDs, package versions, report paths, backup paths, target identity, notification results, and error details.
 
 Common technical events include:
 
@@ -109,33 +106,40 @@ notification.test_completed
 
 `command.failed` includes the error type, message, and traceback. Secret-store events include metadata only and do not intentionally expose plaintext values.
 
-`source.retrying` is written at warning level before a bounded retry of `fetch_source_page` or `download_bundle`. It records the completed attempt, next attempt, maximum attempts, delay, and exception. Its presence alone is not a failed cycle; correlate it with the final `cycle.completed` or `command.failed` event. TLS validation and content-validation failures are not retried. See [Source bundle ingestion](source-bundle-ingestion.md).
+`source.retrying` records a bounded retry of source-page or bundle-download operations. Its presence alone is not a failed cycle; correlate it with the final `cycle.completed` or `command.failed` event.
 
-## Relationship between both files
+## Health report relationship to the journals
 
-The operator and technical journals are complementary, not duplicates.
+The on-demand health script reads or validates information across several sources:
 
-Use the operator file to answer:
+- Git remote, branch, and working tree;
+- source and installed package version;
+- production configuration and safety policy;
+- secret-store metadata;
+- Scheduled Task state, action, last result, and schedule;
+- lifecycle state;
+- latest operator-cycle result;
+- latest retained encrypted backup;
+- latest apply report;
+- UDP/69 listener state;
+- runtime free space;
+- pinned read-only FortiGate preflight;
+- current FortiGuard versions against the latest apply evidence.
 
-- Did the run complete?
-- Which step is still pending, safely skipped, warning, or failed?
-- Did a new package require approval?
-- Was a backup created?
-- Which package needs attention?
-- What should the operator do next?
+Run it with:
 
-Use the technical file to answer:
+```powershell
+& "C:\FGOps\venv\Scripts\python.exe" `
+  "C:\FGOps\scripts\health_report.py"
+```
 
-- Which exact structured result was returned?
-- What manifest ID, SHA-256, package filename, version, or report path was involved?
-- Which exception and traceback caused the failure?
-- What exit code did the Scheduled Task receive?
+The health report does not parse the technical log to determine package activation. Apply reports and FortiGate version evidence remain authoritative.
 
-The shared local date, command, timestamp, package name, manifest ID, and run timing make it possible to correlate the readable checklist with the detailed technical events.
+The health script does not execute `cycle`, `approve`, `apply`, `backup-test`, or any restore operation. Its only active device operation is the existing pinned read-only preflight.
 
 ## Scheduled Task behavior
 
-The Scheduled Task runs `fgops-agent ... cycle` as `SYSTEM`. Foreground and scheduled executions append to the same pair of date-named files.
+The production Scheduled Task runs `fgops-agent ... cycle` as `SYSTEM`. Foreground and scheduled executions append to the same pair of date-named journals.
 
 A successful Task Scheduler invocation normally reports:
 
@@ -143,24 +147,15 @@ A successful Task Scheduler invocation normally reports:
 LastTaskResult : 0
 ```
 
-The operator journal should show a matching final result with exit code `0`. The technical journal should contain a matching `command.completed` event with `exit_code: 0`.
+The operator journal should show a matching final result. The health report also checks the Task state, last result, next run, executable, production config path, and `cycle` action.
 
-Inspect the Task and both logs:
-
-```powershell
-Get-ScheduledTaskInfo -TaskName "FGOps Offline Update Monitor" |
-  Format-List LastRunTime,LastTaskResult,NextRunTime
-
-$Today = Get-Date -Format "yyyy-MM-dd"
-Get-Content "C:\ProgramData\FGOps\logs\fgops-operator-$Today.log" -Tail 100
-Get-Content "C:\ProgramData\FGOps\logs\fgops-$Today.log" -Tail 100
-```
+A deliberately disabled Task is considered unhealthy in normal-state health reporting. During maintenance, record the authorized disabled state and rerun the complete health report after scheduling is restored.
 
 ## Retention and log level
 
-The default retention is 30 date-named files **for each log type**. Expired operator files and expired technical files are removed independently.
+The default retention is 30 date-named files for **each daily log type**.
 
-Optional process or machine environment variables:
+Optional machine/process environment variables:
 
 ```text
 FGOPS_LOG_RETENTION_DAYS=30
@@ -183,15 +178,15 @@ Set machine-wide values from elevated PowerShell:
 )
 ```
 
-`FGOPS_LOG_LEVEL` controls the technical logger. Supported values include `DEBUG`, `INFO`, `WARNING`, `ERROR`, and `CRITICAL`. Invalid values fall back to `INFO` and do not block the update workflow.
+`FGOPS_LOG_LEVEL` controls the technical logger. The operator journal remains an INFO-level operational checklist.
 
-The operator journal remains an INFO-level operational checklist so normal step transitions are not hidden by technical verbosity settings.
+Health reports under `reports\health` are **not** deleted by `FGOPS_LOG_RETENTION_DAYS`. They are timestamped operational evidence and require a separate organizational retention policy.
 
-Retention deletion is best effort. A log temporarily locked by an operator, antivirus tool, collector, or backup process is left in place rather than blocking an update cycle.
+Retention deletion for daily logs is best effort. A file temporarily locked by an operator, antivirus product, collector, or backup process is left in place rather than blocking an update cycle.
 
-## Validate the installed logging entry point
+## Validate the installed logging and health entry points
 
-The operator journal is implemented by the installed `fgops-agent` console entry point. After upgrading, reinstall the project into the virtual environment before validation. The current expected version is `0.5.8`:
+After upgrading, reinstall the checked-out project into the virtual environment before validation. The current documentation baseline remains `0.5.8`:
 
 ```powershell
 Set-Location C:\FGOps
@@ -202,7 +197,7 @@ Set-Location C:\FGOps
 & C:\FGOps\venv\Scripts\python.exe -m pip show fgops
 ```
 
-Run a harmless command:
+Run a harmless installed-agent command:
 
 ```powershell
 & C:\FGOps\venv\Scripts\fgops-agent.exe `
@@ -210,7 +205,7 @@ Run a harmless command:
   status
 ```
 
-Confirm both files exist and contain the same execution period:
+Confirm both daily files exist:
 
 ```powershell
 $Today = Get-Date -Format "yyyy-MM-dd"
@@ -219,14 +214,20 @@ $TechnicalLog = "C:\ProgramData\FGOps\logs\fgops-$Today.log"
 
 Get-Item $OperatorLog,$TechnicalLog |
   Select-Object FullName,Length,LastWriteTime
-
-Get-Content $OperatorLog -Tail 50
-Get-Content $TechnicalLog -Tail 20
 ```
 
 A valid operator entry contains `فهرست مراحل (ToDo):` and `نتیجه نهایی:`. A valid technical entry contains `command.started` and `command.completed` or `command.failed`.
 
-## Operational commands
+After normal scheduling has been restored, run the health report:
+
+```powershell
+& "C:\FGOps\venv\Scripts\python.exe" `
+  "C:\FGOps\scripts\health_report.py"
+```
+
+Confirm the generated TXT and JSON paths are printed and exist below `C:\ProgramData\FGOps\reports\health`.
+
+## Operational log commands
 
 Follow the operator journal:
 
@@ -266,40 +267,26 @@ Select-String `
   -Pattern '"event": "command.failed"|"status": "FAILED"'
 ```
 
-Search for one manifest:
-
-```powershell
-Select-String `
-  -Path "C:\ProgramData\FGOps\logs\*.log" `
-  -Pattern "FGOPS-0123456789ABCDEF"
-```
-
-Search for one package family:
-
-```powershell
-Select-String `
-  -Path "C:\ProgramData\FGOps\logs\*.log" `
-  -Pattern "MMDB|FFDB"
-```
-
 ## Interpretation limits
 
-The journals describe orchestration and evidence paths; they do not independently prove FortiGuard database activation.
+The journals and health report describe orchestration state and evidence paths; they do not independently prove package activation.
 
-Use the apply report and FortiGate `diagnose autoupdate versions` output for final package activation evidence. A TFTP success line proves file delivery only. The result remains failed or unconfirmed when expected object versions do not change and no trusted already-current outcome applies.
+Use the apply report and current FortiGate `diagnose autoupdate versions` evidence for final package activation. A successful TFTP transfer proves delivery only.
+
+`HC-20` helps reconcile current FortiGuard object versions with the versions recorded in the latest apply report. A failed reconciliation must be investigated rather than hidden by a new transfer or manual retry.
 
 ## Security boundary
 
-Both log types are runtime data and must remain outside Git. FGOps does not intentionally write plaintext secret values to either journal. Backup command output continues to use the existing redacted path.
+Daily logs and health reports are runtime data and must remain outside Git. FGOps does not intentionally write plaintext secret values to these records.
 
-Treat both files as sensitive operational records because they can contain:
+They can contain:
 
 - device identity and management address;
-- source URLs;
+- repository/source metadata;
 - package versions and filenames;
 - archive SHA-256 and manifest IDs;
 - evidence, backup, quarantine, and report paths;
 - notification status;
 - failure details and tracebacks.
 
-Restrict access to the runtime host, apply an approved retention policy, and sanitize logs before sharing them outside the authorized operations team. Never attach unsanitized production logs to a public issue or commit them to the repository.
+Restrict access to the runtime host, apply approved retention, and sanitize files before sharing outside the authorized operations team. Never attach unsanitized production logs or health reports to a public issue or commit them to the repository.
