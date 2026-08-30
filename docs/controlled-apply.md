@@ -1,6 +1,6 @@
 # Controlled apply runbook
 
-FGOps v0.5.5 provides the device-changing path for selected offline FortiGuard database packages. The path is designed around exact package identity, pinned target identity, mandatory encrypted backup, temporary TFTP delivery, observed FortiGuard object versions, persistent reports, and daily runtime logging.
+FGOps v0.5.8 provides the device-changing path for selected offline FortiGuard database packages. The path is designed around exact package identity, pinned target identity, mandatory encrypted backup, temporary TFTP delivery, observed FortiGuard object versions, persistent reports, and daily runtime logging.
 
 ## Validated package profile
 
@@ -28,7 +28,9 @@ The validated live cycle completed as `SUCCESS_WITH_WARNING`: AV, IPS, APDB, and
 
 FFDB is excluded from the recommended profile. On the validated FortiGate 300D/FortiOS 6.4.16 target, the tested FFDB package transferred but failed activation with return code `49`; the two expected Internet-service database versions remained unchanged.
 
-The ZIP inventory can still contain FFDB or another disabled family. Only `execution.enabled_packages` authorizes installation. `apply.package_order` sorts already-authorized packages and does not authorize a package by itself.
+The ZIP inventory can still contain FFDB or another disabled family. Only `execution.enabled_packages` authorizes installation. `apply.package_order` sorts already-authorized packages and does not authorize a package by itself. `IGNORED` and `UNKNOWN` records are never selected for controlled apply.
+
+Preparation blocks more than one candidate for any enabled kind. Controlled apply independently repeats that uniqueness check against the saved manifest before package hash verification or device access. Multiple candidates for a disabled kind are retained for audit and cannot enter the apply sequence.
 
 ## Fortinet command basis
 
@@ -104,6 +106,8 @@ fgops-agent `
   run --dry-run
 ```
 
+Before approval, inspect `<work_dir>\manifest.json` and `<work_dir>\agent-plan.json`. Confirm that every planned kind appears exactly once, no package is `UNKNOWN`, and any `IGNORED` record is an expected exact filename. See [Source bundle ingestion](source-bundle-ingestion.md) for the complete review checklist.
+
 Apply the exact manifest:
 
 ```powershell
@@ -136,6 +140,7 @@ A newly downloaded archive or an eligible previously prepared archive enters the
 ```text
 PREPARED
   -> policy/manifest eligibility
+  -> enabled-kind uniqueness recheck
   -> pinned read-only preflight PASS
   -> package and staged-file SHA-256 verification
   -> restricted per-run TFTP root
@@ -153,6 +158,8 @@ PREPARED
 ```
 
 Any failure before the first package restore blocks device changes. A failed mandatory backup blocks all restores.
+
+Source download, extraction, filename conflicts, package-map classification, and preparation uniqueness are evaluated earlier in the preparation plane. A failure in those stages does not open SSH or start the TFTP/backup path.
 
 ## Interactive confirmation boundary
 
@@ -238,4 +245,4 @@ The daily log adds command start, structured result, process exit code, and exce
 5. Correct code, configuration, package allowlist, or source compatibility before retrying.
 6. Do not delete the archive state to force replay.
 7. If a state reset is exceptionally required, back up the state file, target exactly one archive hash/manifest, document the reason, and perform the retry in the foreground.
-8. Re-enable scheduling only after a clean `SUCCESS`, `SUCCESS_WITH_WARNING`, or verified `NO_CHANGE` outcome.
+8. Re-enable scheduling only after a clean `SUCCESS`, `SUCCESS_WITH_WARNING`, `NO_UPDATE`, `NO_CHANGE`, or `NO_CONTENT_CHANGE` outcome and after confirming there is no unresolved failed/review-required state.

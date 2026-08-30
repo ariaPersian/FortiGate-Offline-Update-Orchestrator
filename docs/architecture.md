@@ -1,6 +1,6 @@
 # FGOps architecture
 
-FGOps v0.5.5 separates internet-facing bundle discovery from private-network FortiGate management while keeping the complete production runtime on one controlled Windows VM.
+FGOps v0.5.8 separates internet-facing bundle discovery from private-network FortiGate management while keeping the complete production runtime on one controlled Windows VM.
 
 The authoritative source repository is `ariaPersian/FortiGate-Offline-Update-Orchestrator-Private`. GitHub hosts private source code, pull requests, and CI; GitHub is not in the production runtime data path and device access does not require a self-hosted runner.
 
@@ -10,7 +10,7 @@ The authoritative source repository is `ariaPersian/FortiGate-Offline-Update-Orc
 Configured HTTPS source
         |
         v
-Source monitor and downloader
+Source monitor and retrying downloader
         |
         v
 Incoming archive -> quarantine -> package inventory -> immutable manifest
@@ -36,15 +36,18 @@ Every `fgops-agent` invocation starts a daily journal before loading the full YA
 
 ## Source and preparation plane
 
-1. The agent downloads the configured source page using the selected TLS trust mode.
+1. The agent fetches the configured source page using the selected TLS trust mode. Transient timeout and connection failures are retried with bounded exponential backoff; TLS validation and content-validation failures are not retried.
 2. The link matcher evaluates the anchor, URL, and surrounding list-item context.
-3. The selected archive is downloaded with timeout and maximum-size limits.
+3. The selected archive is downloaded with timeout and maximum-size limits using the same bounded transient-error retry policy.
 4. Archive identity is the downloaded SHA-256, not the URL, filename, or web-page timestamp.
-5. Safe extraction rejects traversal, symlinks, duplicate package kinds, malformed entries, and unknown packages when configured to fail closed.
-6. Each package is recorded by kind, size, filename, SHA-256, restore family, expected FortiGuard objects, and deferred-apply eligibility.
-7. An immutable manifest ID binds the prepared archive and package inventory.
+5. Safe extraction rejects traversal, symlinks, malformed entries, and conflicting files that flatten to the same filename. Byte-identical duplicate members are retained once after SHA-256 verification and recorded as warnings.
+6. Each package is recorded by kind, size, filename, SHA-256, restore family, expected FortiGuard objects, and deferred-apply eligibility. Exact `IGNORED` mappings remain audit-only; arbitrary `UNKNOWN` names still fail closed when configured.
+7. Multiple candidates for an enabled package kind block preparation. Multiple candidates for a disabled kind remain in the manifest with a warning and cannot enter the apply plan.
+8. An immutable manifest ID binds the prepared archive and package inventory. Controlled apply rechecks that every enabled kind resolves to at most one selected package.
 
 A publisher may reuse a stable URL while replacing the ZIP. SHA-256 identity ensures the new content is still detected.
+
+See [Source bundle ingestion](source-bundle-ingestion.md) for the retry settings, package classifications, duplicate decision table, and operator troubleshooting procedure.
 
 ## Policy and state plane
 
@@ -54,6 +57,10 @@ The local state file records each archive lifecycle:
 new content
   -> PREPARED
   -> APPLIED
+
+new archive bytes with an already-applied enabled payload
+  -> CONTENT_DUPLICATE
+  -> NO_CONTENT_CHANGE
 
 PREPARED
   -> APPLY_FAILED
@@ -121,7 +128,7 @@ A successful TFTP transfer proves delivery only. It does not prove that FortiOS 
 
 ## FFDB return code 49
 
-The FFDB guard introduced in v0.5.4 remains present in v0.5.5:
+The FFDB guard introduced in v0.5.4 remains present in v0.5.8:
 
 ```text
 FFDB restore returns 49
@@ -136,13 +143,14 @@ The polling window can be overridden for controlled diagnostics through `FGOPS_F
 
 ## Operational audit plane
 
-FGOps writes one append-only UTF-8 file per local calendar day:
+FGOps writes two append-only UTF-8 files per local calendar day:
 
 ```text
+C:\ProgramData\FGOps\logs\fgops-operator-YYYY-MM-DD.log
 C:\ProgramData\FGOps\logs\fgops-YYYY-MM-DD.log
 ```
 
-The journal records command start, structured result payload, exit code, and unhandled exceptions. Secret commands record metadata only; plaintext secret values are not written. The default retention is 30 daily files and can be adjusted with `FGOPS_LOG_RETENTION_DAYS`.
+The operator journal records a readable checklist, final result, exit code, and suggested action. The technical journal records command start, structured result payload, source retry events, and unhandled exceptions. Secret commands record metadata only; plaintext secret values are not written. The default retention is 30 daily files of each type and can be adjusted with `FGOPS_LOG_RETENTION_DAYS`.
 
 Logging is intentionally non-blocking. Failure to delete an expired file that is temporarily locked must not prevent an update cycle. Logs supplement but do not replace immutable manifests, JSON/TXT evidence, reports, state, or encrypted backups.
 

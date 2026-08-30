@@ -28,9 +28,10 @@ Windows Scheduled Task (SYSTEM)
   -> write the operator ToDo checklist for this run
   -> poll the configured source page
   -> resolve the selected FortiGate bundle link
-  -> download with TLS, size, and timeout limits
+  -> download with TLS, size, timeout, and bounded transient-error retry limits
   -> identify the archive by SHA-256
-  -> safely extract and inventory package files
+  -> safely extract, deduplicate identical members, and inventory package files
+  -> keep exact IGNORED mappings for audit and fail closed on unknown or ambiguous enabled kinds
   -> generate an immutable local manifest
   -> obey prepare_only / approval / unattended policy
   -> load encrypted local secrets when device access is required
@@ -136,7 +137,7 @@ FGOps is designed to fail closed. A controlled apply is blocked when any mandato
 
 - changed or unverified SSH host key;
 - hostname, model, firmware branch, or build mismatch;
-- unknown or disabled package family;
+- unknown package family when rejection is enabled, or an ambiguous enabled package family;
 - package or archive SHA-256 mismatch;
 - missing or empty encrypted backup;
 - downgrade detection;
@@ -221,9 +222,19 @@ git pull --ff-only
 & C:\FGOps\venv\Scripts\python.exe -m pip show fgops
 ```
 
-Validate the new entry point with a harmless command before re-enabling the task:
+The runtime package map normally lives outside Git. Back it up and compare it with `C:\FGOps\config\fortios64-package-map.yml`; copy the reviewed map when no approved local customizations exist, or merge only the reviewed exact legacy exclusion while preserving local policy. Keep `execution.reject_unknown_packages: true`.
+
+Validate configuration and the preparation-only path before re-enabling the task:
 
 ```powershell
+& C:\FGOps\venv\Scripts\fgops-agent.exe `
+  --config C:\ProgramData\FGOps\config.yml `
+  validate-config
+
+& C:\FGOps\venv\Scripts\fgops-agent.exe `
+  --config C:\ProgramData\FGOps\config.yml `
+  run --dry-run
+
 & C:\FGOps\venv\Scripts\fgops-agent.exe `
   --config C:\ProgramData\FGOps\config.yml `
   status
@@ -231,6 +242,8 @@ Validate the new entry point with a harmless command before re-enabling the task
 $Today = Get-Date -Format "yyyy-MM-dd"
 Get-Content "C:\ProgramData\FGOps\logs\fgops-operator-$Today.log" -Tail 50
 ```
+
+Accept `PREPARED`, `NO_CHANGE`, or `NO_CONTENT_CHANGE` only when state has no unresolved `APPLY_FAILED` or `REVIEW_REQUIRED` archive. For a newly prepared archive, review `manifest.json` and confirm that planned kinds are unique and intended, exact legacy files are `IGNORED`, and no record is `UNKNOWN`. See [Source bundle ingestion](docs/source-bundle-ingestion.md) for the full upgrade and troubleshooting checklist.
 
 ## Minimum configuration model
 
@@ -276,6 +289,21 @@ apply:
 ```
 
 Package presence in a downloaded archive does not make it eligible for installation. `execution.enabled_packages` is the authoritative apply allowlist; `apply.package_order` only orders packages that already passed that filter. FFDB may remain visible in a manifest inventory while being excluded from the actual apply sequence.
+
+### Source bundle decision rules
+
+FGOps retries only transient source timeouts and connection failures. TLS validation, source-page ambiguity, archive validation, and package-policy failures stop immediately.
+
+| Input condition | Decision |
+|---|---|
+| Same flattened ZIP filename and identical SHA-256 | Keep one package and record a warning |
+| Same flattened ZIP filename and different SHA-256 | Reject the archive |
+| Multiple files for an enabled kind | Reject as ambiguous |
+| Multiple files for a disabled kind | Retain for audit with a warning |
+| Exact legacy `64...` exclusion | Record as `IGNORED`; never plan, approve, or restore |
+| Any other unmapped filename | Record as `UNKNOWN`; reject when configured |
+
+The package map is executable policy. Do not broaden an `IGNORED` regex or disable unknown rejection merely to make a publisher bundle pass.
 
 ## Validate before the first live restore
 
@@ -356,12 +384,12 @@ Enable unattended execution only after at least one complete approval-mode evide
 |---|---|---|
 | Expected object version increased | `SUCCESS` | `✅` |
 | Version increased despite a FortiOS warning or non-zero code | `SUCCESS_WITH_WARNING` | `⚠️`, review the package row |
-| FortiGate explicitly completed transfer and versions were already current | `SKIPPED_NO_UPDATE` | `⚠️` at package level; safe no-op |
+| FortiGate explicitly completed transfer and versions were already current | `SKIPPED_NO_UPDATE` | `ℹ️` package detail; safe no-op |
 | No new archive bytes were found | `NO_CHANGE` | `✅` final result with apply steps `⏭️` |
 | Expected object missing or unchanged without a trusted successful-transfer outcome | `FAILED_UNCONFIRMED` | `❌` |
 | Version decreased, validation failed, backup failed, or target identity changed | `FAILED` | `❌` and do not retry until investigated |
 
-A cycle with one or more `SKIPPED_NO_UPDATE` package results can finish as `SUCCESS_WITH_WARNING`; this is a completed safe cycle, not a failed apply.
+The technical apply report can remain `SUCCESS_WITH_WARNING` when it contains `SKIPPED_NO_UPDATE`, while the operator checklist treats already-current packages as informational. If every enabled package is current, the operator result is `NO_UPDATE`; a mixture of successful updates and already-current packages is shown as `SUCCESS` unless another warning exists.
 
 ## Schedule the policy cycle
 
@@ -443,6 +471,8 @@ tests/                   automated test suite
 - [Operator checklist logging](docs/operator-checklist-logging.md)
 - [Daily runtime logging](docs/daily-runtime-logging.md)
 - [Production operations and recovery](docs/operations.md)
+- [Source bundle ingestion and troubleshooting](docs/source-bundle-ingestion.md)
+- [Payload-level deduplication](docs/payload-deduplication.md)
 - [Security policy and private vulnerability reporting](SECURITY.md)
 - [Contribution guidelines](CONTRIBUTING.md)
 
