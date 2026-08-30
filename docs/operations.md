@@ -2,7 +2,7 @@
 
 This runbook covers routine operation of FGOps v0.5.8 on a Windows VM after installation and initial validation.
 
-The authoritative source repository is:
+The authoritative production source repository is:
 
 ```text
 https://github.com/ariaPersian/FortiGate-Offline-Update-Orchestrator-Private
@@ -15,271 +15,213 @@ Production upgrades must not be pulled from the former public repository.
 ```text
 Scheduled Task every configured interval
   -> fgops-agent cycle
-  -> operator ToDo checklist and technical JSON journal append
-  -> NO_CHANGE when the downloaded SHA-256 is already processed
-  -> NO_CONTENT_CHANGE when new ZIP bytes contain an already-applied enabled payload
-  -> PREPARED when new archive bytes are discovered
-  -> approval wait or policy-controlled apply
-  -> mandatory preflight and encrypted backup when apply runs
-  -> package-level restore and version verification
-  -> SUCCESS / SUCCESS_WITH_WARNING / FAILED
-  -> operator final status, exit code, suggested action
-  -> state, report, evidence, and technical event persistence
+  -> operator + technical daily journals
+  -> source/package preparation
+  -> approval wait or unattended controlled apply
+  -> pinned preflight + mandatory encrypted backup when apply runs
+  -> package restore + version verification + postflight
+  -> final cycle result + reports + state + evidence
+
+Operator once per shift/day
+  -> scripts\health_report.py
+  -> consolidated HEALTHY / WARNING / CRITICAL
+  -> copy Operator values into the Word checklist
+  -> investigate only WARN/FAIL rows when required
 ```
 
-For the validated unattended profile, enable only:
+The health report replaces the long sequence of routine manual status commands. It does not replace technical evidence, maintenance controls, or explicit approval.
+
+See [Operator health report](operator-health-report.md) for the complete health-check contract.
+
+## Validated production profile
+
+Recommended enabled packages:
 
 ```yaml
 execution:
-  mode: unattended
   enabled_packages: [AV, IPS, APDB, MCDB, MMDB]
+  reject_unknown_packages: true
+  prevent_downgrade: true
 ```
 
-The validated live run completed as `SUCCESS_WITH_WARNING`: AV, IPS, APDB, and MCDB were already current; MMDB increased from `93.07607` to `93.07613`.
+For the first live run after an upgrade or material change, use `approval` mode. Move to `unattended` only after the exact target profile has a reviewed successful evidence set.
 
-FFDB is not part of the recommended default. The tested package transferred but failed activation with return code `49` while both Internet-service database versions remained unchanged.
+FFDB is excluded from the recommended default. On the validated FortiGate 300D / FortiOS 6.4.16 profile, the tested FFDB package transferred but failed activation with return code `49` while both expected Internet-service database versions remained unchanged.
 
-## Logging model
+## Routine operator health check
 
-Every installed `fgops-agent` command writes two daily files:
+Run PowerShell as Administrator:
+
+```powershell
+& "C:\FGOps\venv\Scripts\python.exe" `
+  "C:\FGOps\scripts\health_report.py"
+```
+
+The script checks:
+
+- production Git origin, `main` branch, and working-tree status;
+- source/installed FGOps version parity;
+- configuration and fail-closed execution policy;
+- required DPAPI secret metadata without displaying values;
+- Scheduled Task state, last result, next run, executable, config path, and `cycle` action;
+- unresolved `APPLY_FAILED` / `REVIEW_REQUIRED` archives;
+- latest scheduled-cycle result from the operator journals;
+- latest encrypted backup and latest apply report;
+- UDP/69 listener state and runtime disk capacity;
+- pinned read-only FortiGate preflight;
+- current FortiGuard object versions against the latest apply report.
+
+It writes:
+
+```text
+C:\ProgramData\FGOps\reports\health\fgops-health-YYYYMMDD-HHMMSS.txt
+C:\ProgramData\FGOps\reports\health\fgops-health-YYYYMMDD-HHMMSS.json
+```
+
+### Health decisions
+
+| Result | Exit | Meaning | Action |
+|---|---:|---|---|
+| `HEALTHY` | `0` | No failed or warning checks | Record values and continue normal monitoring |
+| `WARNING` | `1` | One or more warnings require review | Review warning rows and actions; do not automatically repeat an apply |
+| `CRITICAL` | `2` | At least one failed health check | Do not start a new apply; investigate failed rows and preserve evidence |
+
+The health report is designed for **normal production state**. A deliberately disabled Scheduled Task is therefore classified as a failure. During authorized maintenance, record the intentional disabled state and use the maintenance procedure below. Run the full health report again after scheduling has been restored.
+
+For local-only diagnostics without opening a FortiGate SSH session:
+
+```powershell
+& "C:\FGOps\venv\Scripts\python.exe" `
+  "C:\FGOps\scripts\health_report.py" `
+  --skip-preflight
+```
+
+`--skip-preflight` is not a complete production health result.
+
+## Health-script safety boundary
+
+The health script does **not** run:
+
+```text
+cycle
+approve
+apply
+backup-test
+FortiGate restore commands
+```
+
+Its only active FortiGate operation is the existing pinned read-only preflight. That path validates the configured host key and expected device identity and runs only the approved read-only commands documented in [Read-only preflight](read-only-preflight.md).
+
+The script does not start TFTP, export a new backup, approve a manifest, restore a package, or change FortiGate configuration.
+
+## Runtime logs and evidence
+
+Daily journals:
 
 ```text
 C:\ProgramData\FGOps\logs\fgops-operator-YYYY-MM-DD.log
 C:\ProgramData\FGOps\logs\fgops-YYYY-MM-DD.log
 ```
 
-The operator journal is the primary monitoring view. It shows the planned ToDo list and marks each step with:
+The operator journal is the first per-run troubleshooting view. Symbols:
 
 ```text
 ⬜ planned
 🔄 running
 ✅ success
-⚠️ warning or attention required
+⚠️ warning / attention
 ❌ failed
 ⏭️ safely skipped
 ```
 
-The technical journal remains the source for structured result payloads, exceptions, and tracebacks.
+The technical journal contains structured result payloads, exceptions, and tracebacks.
 
-Operational sequence:
-
-1. Check Task Scheduler status.
-2. Read the latest final result in the operator journal.
-3. Review any `⚠️` or `❌` rows within the same run identifier.
-4. Follow the suggested operator action.
-5. Open the technical journal and evidence only when deeper investigation is required.
-
-## Daily checks
-
-Inspect the Scheduled Task:
-
-```powershell
-Get-ScheduledTask -TaskName "FGOps Offline Update Monitor" |
-  Select-Object TaskName,State
-
-Get-ScheduledTaskInfo -TaskName "FGOps Offline Update Monitor" |
-  Format-List LastRunTime,LastTaskResult,NextRunTime
-```
-
-A successful Task Scheduler invocation normally reports:
-
-```text
-LastTaskResult : 0
-```
-
-Inspect today's operator journal:
-
-```powershell
-$Today = Get-Date -Format "yyyy-MM-dd"
-$OperatorLog = "C:\ProgramData\FGOps\logs\fgops-operator-$Today.log"
-Get-Content $OperatorLog -Tail 150
-```
-
-Display only final results and suggested actions:
-
-```powershell
-Select-String `
-  -Path $OperatorLog `
-  -Pattern "نتیجه نهایی:|اقدام پیشنهادی اپراتور:"
-```
-
-Display warnings and failures:
-
-```powershell
-Select-String `
-  -Path "C:\ProgramData\FGOps\logs\fgops-operator-*.log" `
-  -Pattern "⚠️|❌"
-```
-
-Inspect agent state:
-
-```powershell
-& C:\FGOps\venv\Scripts\fgops-agent.exe `
-  --config C:\ProgramData\FGOps\config.yml `
-  status
-```
-
-Inspect the technical journal when required:
-
-```powershell
-$Today = Get-Date -Format "yyyy-MM-dd"
-Get-Content "C:\ProgramData\FGOps\logs\fgops-$Today.log" -Tail 200
-```
-
-Search technical logs for failed commands or failed cycle results:
-
-```powershell
-Select-String `
-  -Path "C:\ProgramData\FGOps\logs\fgops-*.log" `
-  -Pattern '"event": "command.failed"|"status": "FAILED"'
-```
-
-Review the latest reports:
-
-```powershell
-Get-ChildItem C:\ProgramData\FGOps\reports -File |
-  Sort-Object LastWriteTime -Descending |
-  Select-Object -First 10 FullName,Length,LastWriteTime
-```
-
-Review disk usage:
-
-```powershell
-Get-ChildItem C:\ProgramData\FGOps -Recurse -File |
-  Measure-Object Length -Sum
-```
-
-## Weekly checks
-
-- Confirm the checkout remote still points to the private repository.
-- Confirm the installed package version is `0.5.8` or the currently reviewed release.
-- Review the previous seven operator journals for repeated warnings or failures.
-- Confirm every scheduled run has a final operator result; investigate incomplete `🔄` runs.
-- Review the related technical logs for repeated exceptions or notification failures.
-- Confirm a recent encrypted backup exists and has a non-zero size.
-- Confirm apply reports and FortiGate object versions agree.
-- Confirm the Scheduled Task action still invokes `cycle` with the production configuration path.
-- Review disk use under `incoming`, `quarantine`, `evidence`, `reports`, `logs`, and `tftp`.
-
-```powershell
-Set-Location C:\FGOps
-git remote -v
-& C:\FGOps\venv\Scripts\python.exe -m pip show fgops
-
-(Get-ScheduledTask -TaskName "FGOps Offline Update Monitor").Actions |
-  Format-List Execute,Arguments
-```
+The health report is the first routine monitoring view. Open the operator journal when the health report points to the latest cycle or when one exact run must be reviewed. Open the technical journal when deeper failure detail is required.
 
 ## Expected cycle outcomes
 
-### `NO_CHANGE`
+| Cycle result | Interpretation | Operator action |
+|---|---|---|
+| `NO_CHANGE` | Same archive already handled | None |
+| `NO_CONTENT_CHANGE` | ZIP bytes changed but enabled payload was already applied | None; no device-changing path |
+| `NO_UPDATE` | Controlled apply found enabled packages already current | None; do not repeat apply |
+| `PREPARED` | New manifest waits for approval | Review manifest, package list, target, and maintenance authorization |
+| `SUCCESS` | Apply and verification completed | Retain evidence and continue monitoring |
+| `SUCCESS_WITH_WARNING` | Safe completion with warning/already-current package | Review report; usually no retry |
+| `SUCCESS_WITH_NOTIFICATION_ERROR` | Main operation succeeded, notification failed | Fix notification path only |
+| `PREPARED_WITH_NOTIFICATION_ERROR` | Manifest prepared, notification failed | Review manifest and notification issue |
+| `FAILED` | Mandatory gate, backup, package, or verification failed | Disable/keep scheduling disabled and investigate |
 
-The configured source was reachable and the downloaded archive SHA-256 was already known. No package restore is performed.
+A successful TFTP transfer proves file delivery only. Package activation is classified from FortiGuard object-version evidence and trusted FortiOS results.
 
-Operator view:
+## Approval-mode live apply
 
-- source check: `✅`;
-- prepare/apply-only steps: `⏭️`;
-- final result: `✅ NO_CHANGE`;
-- suggested action: no action required.
+When a new archive is `PREPARED`, inspect the generated manifest and matching `agent-plan.json` before approval.
 
-### `NO_CONTENT_CHANGE`
+Confirm:
 
-The ZIP archive SHA-256 changed, but the enabled package-kind/SHA-256 payload exactly matches a previously applied payload. The archive is recorded as `CONTENT_DUPLICATE`; no SSH connection, backup, TFTP endpoint, or restore is performed.
+- the manifest belongs to the current run;
+- source and target are expected;
+- archive/package SHA-256 values are present;
+- every enabled package kind is unique;
+- no package is `UNKNOWN`;
+- `IGNORED` entries are only reviewed exact exclusions;
+- enabled packages are limited to the approved allowlist;
+- the maintenance window is authorized.
 
-Operator view:
-
-- source and payload comparison: `✅`;
-- device-changing steps: `⏭️`;
-- final result: `✅ NO_CONTENT_CHANGE`;
-- suggested action: no apply is required; retain normal audit state.
-
-### `NO_UPDATE`
-
-Controlled apply completed, but every enabled package was already current. The technical apply report retains the package-level evidence; the operator view classifies the run as an informational no-op.
-
-Operator view:
-
-- backup and controlled transfer path: completed;
-- package details: `ℹ️ SKIPPED_NO_UPDATE`;
-- final result: `✅ NO_UPDATE`;
-- suggested action: no repeat apply is required.
-
-### `PREPARED`
-
-A new archive was discovered and prepared. In `approval` mode it waits for explicit manifest approval. This is an expected controlled state.
-
-Operator view:
-
-- preparation: `✅`;
-- execution gate: `⚠️` waiting for approval;
-- device-changing steps: `⏭️`;
-- final result: `⚠️ PREPARED` with approval guidance.
-
-### `SUCCESS`
-
-All applied packages produced the expected version increase and postflight passed.
-
-Operator view: final `✅`, with successful backup, package, verification, and report rows.
-
-### `SUCCESS_WITH_WARNING`
-
-The cycle completed safely, but at least one package was already current or FortiOS produced a non-blocking warning while the expected version still increased.
-
-Operator view: final `⚠️`; review each warning package row and the apply report. This outcome does not imply a failed cycle.
-
-### `SUCCESS_WITH_NOTIFICATION_ERROR` or `PREPARED_WITH_NOTIFICATION_ERROR`
-
-The principal workflow completed or prepared successfully, but Telegram delivery failed.
-
-Operator view: final `⚠️`; check notification configuration without repeating an already-completed apply.
-
-### `FAILED`
-
-At least one mandatory gate, backup operation, package result, or postflight check failed. The remaining sequence may have stopped.
-
-Operator view: final `❌`; disable scheduling and investigate before any retry.
-
-## Maintenance-window procedure
-
-1. Confirm console or alternate management access is available.
-2. Confirm the Windows VM and FortiGate management path are reachable.
-3. Confirm UDP/69 is not used by another service.
-4. Confirm the Scheduled Task is not already running.
-5. Confirm recent encrypted backups and evidence are retained.
-6. Review `execution.enabled_packages` and execution mode.
-7. Disable scheduling for foreground testing.
-8. Follow the operator journal while the cycle runs.
-9. Open the technical journal in a second window only when needed.
+To prevent overlap, disable the Scheduled Task before a foreground approval/apply:
 
 ```powershell
 Disable-ScheduledTask -TaskName "FGOps Offline Update Monitor"
-
-$Today = Get-Date -Format "yyyy-MM-dd"
-$OperatorLog = "C:\ProgramData\FGOps\logs\fgops-operator-$Today.log"
-
-Start-Job {
-  param($Path)
-  while (-not (Test-Path $Path)) { Start-Sleep -Seconds 1 }
-  Get-Content $Path -Wait
-} -ArgumentList $OperatorLog
-
-& C:\FGOps\venv\Scripts\fgops-agent.exe `
-  --config C:\ProgramData\FGOps\config.yml `
-  cycle
 ```
 
-Re-enable scheduling only after reviewing the foreground result:
+Confirm no existing run is active:
 
 ```powershell
-Enable-ScheduledTask -TaskName "FGOps Offline Update Monitor"
+Get-Process -Name "fgops-agent","python" -ErrorAction SilentlyContinue
+Get-NetUDPEndpoint -LocalPort 69 -ErrorAction SilentlyContinue
 ```
 
-Do not re-enable after `FAILED`, an incomplete run, or an unresolved warning that affects safety.
+Approve the exact reviewed manifest:
+
+```powershell
+& C:\FGOps\venv\Scripts\fgops-agent.exe `
+  --config C:\ProgramData\FGOps\config.yml `
+  approve `
+  --manifest-id FGOPS-0123456789ABCDEF
+```
+
+Follow the operator journal in another PowerShell window when desired:
+
+```powershell
+$Today = Get-Date -Format "yyyy-MM-dd"
+Get-Content "C:\ProgramData\FGOps\logs\fgops-operator-$Today.log" -Wait
+```
+
+The controlled apply path is:
+
+```text
+manifest/policy gate
+  -> package hash verification
+  -> pinned read-only preflight
+  -> temporary TFTP
+  -> mandatory encrypted full-config backup
+  -> permanent backup SHA-256 verification
+  -> enabled package restore in configured order
+  -> version check after each package
+  -> postflight
+  -> JSON/TXT apply report
+  -> lifecycle state update
+  -> TFTP cleanup
+```
+
+A failed mandatory backup blocks package restores.
 
 ## Verify a completed apply
 
-Read the latest apply report:
+The health report automatically reconciles current FortiGuard versions with the latest apply report as `HC-20`.
+
+For manual technical verification, inspect the newest apply report:
 
 ```powershell
 $Report = Get-ChildItem C:\ProgramData\FGOps\reports `
@@ -290,151 +232,119 @@ $Report = Get-ChildItem C:\ProgramData\FGOps\reports `
 Get-Content $Report.FullName -Raw | ConvertFrom-Json
 ```
 
-On the FortiGate, compare with:
+On the FortiGate:
 
 ```text
 diagnose autoupdate versions
 diagnose autoupdate signature check-all
 ```
 
-The report should agree with the target's current FortiGuard object versions. A changed `Last Updated` timestamp without a version change and with an explicit restore failure is not sufficient evidence of activation.
+The report and current FortiGuard versions must agree. A changed timestamp or a historical TFTP-success message without version evidence is not sufficient proof of activation.
 
-The operator package row is a summary. The apply report and before/after version evidence remain authoritative.
+## Re-enable scheduling after maintenance
+
+Do not re-enable scheduling after `FAILED`, an incomplete run, or an unresolved safety warning.
+
+When the foreground operation is accepted:
+
+```powershell
+Enable-ScheduledTask -TaskName "FGOps Offline Update Monitor"
+```
+
+Then run the normal-state health report:
+
+```powershell
+& "C:\FGOps\venv\Scripts\python.exe" `
+  "C:\FGOps\scripts\health_report.py"
+```
+
+Record the resulting `Operator values` in the Word checklist.
 
 ## Upgrade FGOps from the private repository
 
-Disable the Scheduled Task during upgrade:
+Disable scheduling during source/environment changes:
 
 ```powershell
 Disable-ScheduledTask -TaskName "FGOps Offline Update Monitor"
 
 Set-Location C:\FGOps
 git remote -v
-git status
+git status --short
+git branch --show-current
 ```
 
-The remote must point to:
+The production origin must be:
 
 ```text
 https://github.com/ariaPersian/FortiGate-Offline-Update-Orchestrator-Private.git
 ```
 
-For an already-correct private checkout:
+Pull only the reviewed private `main`:
 
 ```powershell
 git fetch --prune origin
 git switch main
 git pull --ff-only
+```
 
+Reinstall the checked-out project into the existing virtual environment:
+
+```powershell
 & C:\FGOps\venv\Scripts\python.exe `
   -m pip install --upgrade --force-reinstall --no-deps C:\FGOps
 
 & C:\FGOps\venv\Scripts\python.exe -m pip show fgops
 ```
 
-The forced local reinstall prevents older installed modules or an older generated `fgops-agent.exe` from surviving a source-only pull. Confirm that `pip show fgops` reports `0.5.8`.
-
-The production package map normally lives outside Git. Back it up and compare it with the reviewed v0.5.8 map:
+Confirm the operator-health script exists:
 
 ```powershell
-$RuntimeMap = "C:\ProgramData\FGOps\fortios64-package-map.yml"
-$ReviewedMap = "C:\FGOps\config\fortios64-package-map.yml"
-
-Copy-Item $RuntimeMap "$RuntimeMap.pre-v0.5.8.bak" -ErrorAction Stop
-Compare-Object `
-  (Get-Content $RuntimeMap) `
-  (Get-Content $ReviewedMap)
+Test-Path "C:\FGOps\scripts\health_report.py"
 ```
 
-If the runtime map has no approved local customizations, replace it with the reviewed map. Otherwise merge and review the exact legacy `64...` `IGNORED` rule without discarding local policy:
+Validate while the Task is still disabled:
 
 ```powershell
-Copy-Item $ReviewedMap $RuntimeMap -Force
-```
-
-Keep `execution.reject_unknown_packages: true`. Add the bounded retry settings when they are absent:
-
-```yaml
-source:
-  retry_attempts: 3
-  retry_backoff_seconds: 2
-```
-
-Validate the installed package, configuration, and source-only preparation path:
-
-```powershell
-& C:\FGOps\venv\Scripts\python.exe -m pip show fgops
-
 & C:\FGOps\venv\Scripts\fgops-agent.exe `
   --config C:\ProgramData\FGOps\config.yml `
   validate-config
 
 & C:\FGOps\venv\Scripts\fgops-agent.exe `
   --config C:\ProgramData\FGOps\config.yml `
-  run --dry-run
+  status
 
 & C:\FGOps\venv\Scripts\fgops-agent.exe `
   --config C:\ProgramData\FGOps\config.yml `
-  status
-
-$Today = Get-Date -Format "yyyy-MM-dd"
-Get-Item `
-  "C:\ProgramData\FGOps\logs\fgops-operator-$Today.log", `
-  "C:\ProgramData\FGOps\logs\fgops-$Today.log"
+  run --dry-run
 ```
 
-Do not re-enable scheduling unless the version is `0.5.8`, configuration validation succeeds, both journals exist, the dry run returns `PREPARED`, `NO_CHANGE`, or `NO_CONTENT_CHANGE`, and state has no unresolved `APPLY_FAILED` or `REVIEW_REQUIRED` archive. For `PREPARED`, inspect `manifest.json`: planned kinds must be unique and intended, exact legacy files may be `IGNORED`, and no file may remain `UNKNOWN`.
+Accept a preparation-plane result only when state has no unresolved `APPLY_FAILED` or `REVIEW_REQUIRED` entry. For `PREPARED`, inspect the manifest before any approval.
 
-See [Source bundle ingestion](source-bundle-ingestion.md) for the full upgrade validation and failure decision table.
+After maintenance validation is accepted, enable the Task and run the full health report. A `WARNING` must be reviewed; a `CRITICAL` must not be ignored merely to restore unattended operation.
 
-If fetch reports a forced update or pull reports diverging branches, do not merge or rebase the former public history into production. Follow [Private repository synchronization](private-repository-sync.md), which preserves a safety branch and stash before aligning local `main` to private `origin/main`.
+If the private/public histories diverge, follow [Private repository synchronization](private-repository-sync.md). Do not temporarily point the production VM at the public origin to obtain the health script or documentation.
 
-## Rotate secrets
+## Failure response
 
-```powershell
-fgops-agent --config C:\ProgramData\FGOps\config.yml secret set FGOPS_SSH_PASSWORD
-fgops-agent --config C:\ProgramData\FGOps\config.yml secret set FGOPS_BACKUP_PASSWORD
-fgops-agent --config C:\ProgramData\FGOps\config.yml secret status
-```
+When a cycle is `FAILED`, the latest run is incomplete, or the health report is `CRITICAL` due to an operational safety failure:
 
-After SSH credential or host-key rotation, run `scan-host-key`, independently verify the new fingerprint, update configuration, and run `preflight` before restoring scheduled operation.
+1. do not run a new `cycle`, `approve`, or `apply`;
+2. disable or keep the Scheduled Task disabled when the failure can affect device-changing operations;
+3. preserve the health TXT/JSON report;
+4. record failed `HC-xx` checks;
+5. preserve the latest operator run identifier and first `❌` row;
+6. preserve the technical journal;
+7. preserve apply JSON/TXT, preflight/postflight evidence, encrypted backup, state, quarantine, and retained TFTP evidence;
+8. compare current FortiGuard versions with the last known apply evidence;
+9. correct the root cause before retry;
+10. retry in the foreground;
+11. restore scheduling only after a reviewed result and a normal-state health report.
 
-The operator journal confirms that the secret operation completed without displaying the secret value.
+Do not delete state, edit a manifest, rename an unknown package, broaden the package map, disable downgrade protection, or repeat an uncertain apply merely to clear the failure.
 
-## Failure-response procedure
+## Incomplete run
 
-1. Disable the Scheduled Task.
-2. Do not run `cycle`, `approve`, or `apply` again immediately.
-3. Preserve the failed operator run identifier and every `❌` row.
-4. Preserve:
-   - the operator daily journal;
-   - the technical daily journal;
-   - the failed apply JSON/TXT report;
-   - preflight and postflight evidence;
-   - the encrypted full-config backup;
-   - `agent-state.json`;
-   - the relevant quarantine directory;
-   - the failed per-run TFTP directory if retained;
-   - FortiGate CLI/debug output.
-5. Determine the first failed checklist step and the last package result.
-6. Compare before/after versions on the FortiGate.
-7. Distinguish transfer from activation. `Get ... from tftp server OK.` proves transfer, not successful database activation.
-8. Correct the package allowlist, source compatibility, target configuration, credentials, network path, or code before retrying.
-9. Perform the retry in the foreground.
-10. Re-enable scheduling only after a successful reviewed result.
-
-## Incomplete operator run
-
-A run may end without `نتیجه نهایی:` if the process is terminated externally, the VM reboots, or the process is killed before normal cleanup.
-
-When the last row remains `🔄`:
-
-1. check whether the Scheduled Task or process is still active;
-2. do not start an overlapping run;
-3. inspect the technical journal for `command.failed` or abrupt termination timing;
-4. inspect Windows Event Viewer and Task Scheduler history;
-5. confirm temporary TFTP is not still listening;
-6. treat the run as unresolved until the state and FortiGate are checked.
+If the latest operator row remains `🔄` and there is no final result:
 
 ```powershell
 Get-Process -Name "fgops-agent","python" -ErrorAction SilentlyContinue
@@ -442,93 +352,50 @@ Get-NetUDPEndpoint -LocalPort 69 -ErrorAction SilentlyContinue
 Get-ScheduledTaskInfo -TaskName "FGOps Offline Update Monitor"
 ```
 
-## State recovery
-
-FGOps intentionally does not replay `APPLY_FAILED` archives automatically. Do not delete the state file or archive entry merely to force a retry.
-
-When an exceptional recovery reset is justified:
-
-- back up `agent-state.json` first;
-- target one exact archive SHA-256 and manifest ID;
-- verify the current FortiGate versions before reset;
-- record the root cause and recovery reason;
-- change only the intended archive from `APPLY_FAILED` to `PREPARED`;
-- run the recovery cycle in the foreground;
-- preserve both the original and recovered reports and both daily log types.
-
-A state reset authorizes another attempt; it does not prove that repeating a package is safe.
+Do not start another run until the previous execution is resolved.
 
 ## FFDB troubleshooting
 
-The recommended production profile excludes FFDB unless independently validated.
+The default production profile excludes FFDB unless independently validated.
 
-If FFDB is enabled and FortiOS returns code `49`:
+If FFDB is enabled and FortiOS returns code `49`, allow the bounded polling behavior to finish without submitting another FFDB package. Treat unchanged expected Internet-service database versions as failure, not as an already-current success.
 
-```text
-Get other objects from tftp server OK.
-Failed to restore other objects file.
-Command fail. Return code 49
-```
-
-then:
-
-1. keep scheduling disabled;
-2. do not submit a second FFDB package while FortiOS may still be parsing;
-3. inspect `Internet-service Database Apps` and `Internet-service Full Database Maps`;
-4. allow the bounded polling window to complete;
-5. treat unchanged versions as failure, not as `SKIPPED_NO_UPDATE`;
-6. remove FFDB from `execution.enabled_packages` when compatibility cannot be established.
-
-The package may remain visible in `manifest.json` because the manifest inventories the ZIP. It is absent from `planned_packages` and is not restored unless it is explicitly added to `execution.enabled_packages` and the package map marks it safe for deferred apply.
-
-## Source and inventory troubleshooting
-
-The technical event `source.retrying` means a transient page-fetch or bundle-download failure will be retried automatically. Do not start a second foreground or scheduled run while the current retry budget is active.
-
-When preparation fails:
-
-1. keep the Scheduled Task disabled if the failure repeats;
-2. preserve the technical and operator journals, downloaded ZIP, state file, and quarantine directory;
-3. identify whether the first failure is source connectivity, ZIP filename conflict, enabled-kind ambiguity, or an unknown package;
-4. do not rename a package, delete one candidate, broaden a package-map regex, or disable unknown rejection merely to make the run pass;
-5. correct the source or reviewed package policy, run `validate-config`, and repeat `run --dry-run` in the foreground;
-6. re-enable scheduling only after reviewing a successful preparation-plane result.
-
-These failures happen before pinned SSH, backup, TFTP, or restore. Exact duplicate and classification behavior is documented in [Source bundle ingestion](source-bundle-ingestion.md).
+When compatibility cannot be established, remove FFDB from `execution.enabled_packages` and retain the evidence.
 
 ## Retention and cleanup
 
-The default retention is 30 date-named files for each log type. Configure a machine-wide value when organizational policy requires a different period:
+`FGOPS_LOG_RETENTION_DAYS` controls date-named operator and technical journals.
 
-```powershell
-[Environment]::SetEnvironmentVariable(
-  "FGOPS_LOG_RETENTION_DAYS",
-  "30",
-  "Machine"
-)
+It does **not** rotate timestamped health reports under:
+
+```text
+C:\ProgramData\FGOps\reports\health
 ```
 
-Define an organizational retention policy for:
+Define organizational retention for:
 
 - incoming archives;
 - quarantine manifests and package copies;
 - encrypted backups;
 - preflight/postflight evidence;
 - apply reports;
+- health reports;
 - operator daily journals;
 - technical daily journals;
-- state backups made during recovery;
+- recovery state backups;
 - manually captured FortiGate debug output.
 
-Never delete the only known-good encrypted configuration backup during routine cleanup. Verify that the backup password is retained through an approved secret-recovery process separate from the backup file.
+Never delete the only known-good encrypted configuration backup during routine cleanup.
 
 ## Related documentation
 
+- [Operator health report](operator-health-report.md)
 - [Operator checklist logging](operator-checklist-logging.md)
 - [Daily runtime logging](daily-runtime-logging.md)
 - [Standalone Windows agent](standalone-agent.md)
 - [Controlled apply](controlled-apply.md)
 - [Backup test](backup-test.md)
+- [Read-only preflight](read-only-preflight.md)
 - [Private repository synchronization](private-repository-sync.md)
 - [Source bundle ingestion](source-bundle-ingestion.md)
 - [Payload-level deduplication](payload-deduplication.md)
